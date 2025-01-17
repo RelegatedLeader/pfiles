@@ -10,6 +10,8 @@ const rateLimit = require("express-rate-limit"); // this is to prvent brute forc
 const cors = require("cors"); // used to prevent cross-origin attacks where a malicious site tries to access your api
 const helmet = require("helmet"); //prevents clickjacking, MIME sniffing , and other attacks
 const { body, validationResult } = require("express-validator"); //prevents SQL injection and XXS by cleaning incoming data
+const multer = require("multer"); //to upload files securely
+const path = require("path"); ///was added with the multer above
 
 //Clickjacking is a malicious technique where an attacker tricks a user into clicking on something
 //  different from what they perceive, potentially
@@ -471,8 +473,126 @@ app.use(cors(corsOptions));
 // Apply security headers
 app.use(helmet()); // now the API has additional protection against common attacks
 app.use(
-  helmet.hsts({ maxAge: 31536000, includeSubDomains: true, preload: true }) //✅ Now, the browser will always use HTTPS if available.
+  helmet.hsts({ maxAge: 31536000, includeSubDomains: true, preload: true }) //now the browser will always use HTTPS if available.
 );
+
+//set up storage engine (files will be stored in 'uploads' folder)
+const storage = multer.diskStorage({
+  destination: "uploads/", //save files to 'uploads' folder
+  filename: (req, file, cb) => {
+    //cb = callback function : cb is used to provide the result of the operation to Multer
+    cb(null, `${Date.now()}-${file.originalname}`); // Unique filename)
+  },
+});
+
+//configure multer with file size limit (5 mb max)
+const upload = multer({
+  storage: storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, //5mb limit
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = [
+      "image/jpeg",
+      "image/png",
+      "application/pdf",
+      "audio/mpeg",
+      "video/mp4",
+      "video/x-msvideo",
+      "video/quicktime", // MP4, AVI, MOV
+    ];
+
+    if (!allowedTypes.includes(file.mimetype)) {
+      return cb(
+        new Error("Invalid file type. Only JPG, PNG, PDF, and MP3 allowed.")
+      );
+    }
+    cb(null, true);
+  },
+});
+
+//// File upload endpoint (Authenticated users only)
+
+//to get the files via /uploads/ {filename}
+app.use("/uploads", express.static("uploads"));
+
+app.post(
+  "/upload",
+  authenticateToken,
+  upload.single("file"),
+  async (req, res) => {
+    try {
+      console.log("FIle Upload: ", req.file); //log in just in case errors arise
+
+      const filePath = req.file.path; //path where the file is stored
+      const user_id = req.user.user_id; //get user ID from token
+
+      //save file reference in the database
+      const result = await pool.query(
+        "INSERT INTO ideas (user_id, title, file_path) VALUES ($1,$2,$3) RETURNING *",
+        [user_id, req.file.originalname, filePath]
+      );
+
+      res.json({
+        message: "File uploaded successfully!",
+        file: result.rows[0],
+      });
+    } catch (err) {
+      console.error("Upload Error:", err.message);
+      res.status(500).json({ error: "File upload failed." });
+    }
+  }
+);
+
+//gets the files within the database
+app.get("/files/:id", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log(`Fetching file with ID: ${id}`); // Debugging
+
+    const result = await pool.query("SELECT * FROM ideas WHERE id = $1", [id]);
+
+    if (result.rows.length === 0) {
+      console.log("❌ No file found for this ID."); // Debugging
+      return res.status(404).json({ error: "File not found" });
+    }
+
+    const file = result.rows[0];
+    console.log("✅ File Retrieved:", file); // Debugging
+
+    // Convert Windows-style backslashes to forward slashes
+    const correctedPath = file.file_path.replace(/\\/g, "/");
+    const fileUrl = `http://localhost:3000/${correctedPath}`;
+    console.log("✅ Corrected File URL:", fileUrl); // Debugging
+
+    res.json({ file_url: fileUrl });
+  } catch (err) {
+    console.error("❌ File Retrieval Error:", err.message);
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+// Serve static files from the uploads directory
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+
+app.post("/cleanup-missing-files", async (req, res) => {
+  try {
+    console.log("Checking for missing files...");
+
+    const result = await pool.query("SELECT id, file_path FROM ideas");
+
+    let deletedCount = 0;
+    for (const row of result.rows) {
+      if (!fs.existsSync(row.file_path)) {
+        await pool.query("DELETE FROM ideas WHERE id = $1", [row.id]);
+        deletedCount++;
+      }
+    }
+
+    res.json({ message: `Deleted ${deletedCount} orphaned records.` });
+  } catch (err) {
+    console.error("Cleanup Error:", err.message);
+    res.status(500).json({ error: "Cleanup failed." });
+  }
+});
 
 app.listen(port, () => {
   console.log(`Server is listening on port ${port}`);

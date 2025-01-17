@@ -9,3 +9,6 @@ node_modules/
 
 # Ignore system files
 .DS_Store
+
+# Ignore uploaded files
+uploads/
