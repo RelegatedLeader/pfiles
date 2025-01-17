@@ -6,6 +6,16 @@ const crypto = require("crypto"); //hashes it
 const nodemailer = require("nodemailer"); //send emails
 const jwt = require("jsonwebtoken"); // generates jwt token which is more secure and scalable
 const cron = require("node-cron"); // to delete expired tokens on the daily basis
+const rateLimit = require("express-rate-limit"); // this is to prvent brute force attacks (e.g repeated login attempts)
+const cors = require("cors"); // used to prevent cross-origin attacks where a malicious site tries to access your api
+const helmet = require("helmet"); //prevents clickjacking, MIME sniffing , and other attacks
+const { body, validationResult } = require("express-validator"); //prevents SQL injection and XXS by cleaning incoming data
+
+//Clickjacking is a malicious technique where an attacker tricks a user into clicking on something
+//  different from what they perceive, potentially
+//  revealing confidential information or allowing the attacker to take control of their computer.
+//MIME sniffing is a technique used by web browsers to determine the file format of a
+//  resource when the MIME type is not explicitly specified or is incorrect, by analyzing the content of the resource.
 
 dotenv.config(); //load environment variables
 
@@ -228,50 +238,78 @@ app.post("/generate-hash", async (req, res) => {
   }
 });
 
+//this limits request to 100 per 15 minsutes per ip
+const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, //15 minutes
+  max: 5, //limit each ip to 5 login attempts
+  message: "Too many login attempts, Please try again later",
+  headers: true,
+});
+
 // this is the login verification - the user (me) will submit the hash for verification and chekc if its valid
 //it is modified to be able to refresh tokens to avoid using frequent logins!
-app.post("/login", async (req, res) => {
-  console.log("Login route hit!"); // Debugging
-  console.log("Received hash_code:", req.body.hash_code); // Debugging
+app.post(
+  "/login",
+  loginLimiter,
+  [
+    //this is from the express-validator
+    body("hash_code")
+      .isLength({ min: 32, max: 32 })
+      .withMessage("Invalid hash format"),
+  ],
+  async (req, res) => {
+    console.log("Login route hit!"); // Debugging
+    console.log("Received hash_code:", req.body.hash_code); // Debugging
 
-  const { hash_code } = req.body; //gets hash from user input
+    //from express-validator that is used to prevent xxs and SQL injection attacks
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    } //now  requests with invalid hash_code formats will be rejected before reaching the database.
 
-  try {
-    const result = await pool.query(
-      "SELECT * FROM hashes WHERE hash_code = $1 AND expires_at > NOW()",
-      [hash_code]
-    );
+    const { hash_code } = req.body; //gets hash from user input
 
-    if (result.rows.length === 0) {
-      return res.status(401).json({ error: "Invalid or expired hash." });
+    try {
+      const result = await pool.query(
+        "SELECT * FROM hashes WHERE hash_code = $1 AND expires_at > NOW()",
+        [hash_code]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(401).json({ error: "Invalid or expired hash." });
+      }
+
+      const user_id = result.rows[0].user_id;
+
+      // Generate Access Token (Short-lived)
+      const accessToken = jwt.sign({ user_id }, process.env.JWT_SECRET, {
+        expiresIn: "30d",
+      });
+
+      // Generate Refresh Token (Longer-lived)
+      const refreshToken = jwt.sign(
+        { user_id },
+        process.env.JWT_REFRESH_SECRET,
+        {
+          expiresIn: "60d",
+        }
+      );
+
+      //users now receive a refresh token that allows them to get a new access token without logging in again
+
+      // Store refresh token in DB
+      await pool.query(
+        "INSERT INTO refresh_tokens (user_id, token) VALUES ($1, $2)",
+        [user_id, refreshToken]
+      );
+
+      res.json({ accessToken, refreshToken });
+    } catch (err) {
+      console.error(err.message);
+      res.status(500).json({ error: "Server Error" });
     }
-
-    const user_id = result.rows[0].user_id;
-
-    // Generate Access Token (Short-lived)
-    const accessToken = jwt.sign({ user_id }, process.env.JWT_SECRET, {
-      expiresIn: "30d",
-    });
-
-    // Generate Refresh Token (Longer-lived)
-    const refreshToken = jwt.sign({ user_id }, process.env.JWT_REFRESH_SECRET, {
-      expiresIn: "60d",
-    });
-
-    //users now receive a refresh token that allows them to get a new access token without logging in again
-
-    // Store refresh token in DB
-    await pool.query(
-      "INSERT INTO refresh_tokens (user_id, token) VALUES ($1, $2)",
-      [user_id, refreshToken]
-    );
-
-    res.json({ accessToken, refreshToken });
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).json({ error: "Server Error" });
   }
-});
+);
 
 //now that we can authenticate a user ^ ... lets ensure that only logged-in users can access certain endpoints
 //basically securing protected routes
@@ -411,6 +449,30 @@ cron.schedule("0 0 * * *", async () => {
   console.log("Cleaning up expired tokens...");
   await pool.query("DELETE FROM refresh_tokens WHERE expires_at < NOW()");
 });
+
+/**🔒 Security Enhancements Plan
+//this will be applied all around the code to ensure that they are relative and used within
+Rate Limiting	Prevents brute-force attacks
+CORS Configuration	Protects against cross-origin attacks
+Helmet (HTTP Security Headers)	Adds extra security layers
+Input Validation & Sanitization	Prevents SQL injection & XSS
+HSTS (Strict Transport Security)	Forces HTTPS for added security */
+
+// Restrict API access to specific origins
+const corsOptions = {
+  origin: ["http://localhost:3000"], // Update this to your frontend URL when deployed
+  methods: "GET,POST,PUT,DELETE",
+  allowedHeaders: "Content-Type,Authorization",
+};
+//now only the frontend can access the API, blocking external malicious requests.
+
+app.use(cors(corsOptions));
+
+// Apply security headers
+app.use(helmet()); // now the API has additional protection against common attacks
+app.use(
+  helmet.hsts({ maxAge: 31536000, includeSubDomains: true, preload: true }) //✅ Now, the browser will always use HTTPS if available.
+);
 
 app.listen(port, () => {
   console.log(`Server is listening on port ${port}`);
