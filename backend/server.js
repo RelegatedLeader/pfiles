@@ -12,6 +12,7 @@ const helmet = require("helmet"); //prevents clickjacking, MIME sniffing , and o
 const { body, validationResult } = require("express-validator"); //prevents SQL injection and XXS by cleaning incoming data
 const multer = require("multer"); //to upload files securely
 const path = require("path"); ///was added with the multer above
+const fs = require("fs"); // File system module for deletion
 
 //Clickjacking is a malicious technique where an attacker tricks a user into clicking on something
 //  different from what they perceive, potentially
@@ -593,6 +594,64 @@ app.post("/cleanup-missing-files", async (req, res) => {
     res.status(500).json({ error: "Cleanup failed." });
   }
 });
+
+// DELETE endpoint to remove a file
+app.delete("/files/:id", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user_id = req.user.user_id;
+
+    console.log(`Received DELETE request for file ID: ${id}`); // Debugging
+
+    // Retrieve file info from the database
+    const result = await pool.query(
+      "SELECT * FROM ideas WHERE id = $1 AND user_id = $2",
+      [id, user_id]
+    );
+
+    if (result.rows.length === 0) {
+      console.log("Unauthorized deletion attempt or file not found.");
+      return res.status(404).json({ error: "File not found or unauthorized" });
+    }
+
+    const filePath = result.rows[0].file_path;
+
+    // Delete the file from the server storage
+    fs.unlink(filePath, async (err) => {
+      if (err) {
+        console.error("File deletion error:", err.message);
+        return res.status(500).json({ error: "File deletion failed" });
+      }
+
+      // Remove file reference from the database
+      await pool.query("DELETE FROM ideas WHERE id = $1", [id]);
+
+      console.log(`File deleted successfully: ${filePath}`);
+      res.json({ message: "File deleted successfully" });
+    });
+  } catch (err) {
+    console.error("File Deletion Error:", err.message);
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+//automatic cleanup function to remove database entries for missing files
+
+async function cleanupOrphanedFiles() {
+  console.log("Checking for orphaned file records...");
+
+  const result = await pool.query("SELECT id, file_path FROM ideas");
+
+  for (let row of result.rows) {
+    if (!fs.existsSync(row.file_path)) {
+      console.log(`Removing orphaned entry: ${row.file_path}`);
+      await pool.query("DELETE FROM ideas WHERE id = $1", [row.id]);
+    }
+  }
+}
+
+// Run the cleanup function every 24 hours (Optional), runs every night to remove broken file records!
+cron.schedule("0 0 * * *", cleanupOrphanedFiles);
 
 app.listen(port, () => {
   console.log(`Server is listening on port ${port}`);
