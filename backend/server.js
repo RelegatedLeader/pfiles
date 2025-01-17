@@ -368,6 +368,7 @@ async function authenticateToken(req, res, next) {
     if (revoked.rows.length > 0)
       return res.status(403).json({ error: "Token has been revoked." });
 
+    // Attach user_id to req for later use
     req.user = decoded;
     next();
   } catch (err) {
@@ -478,13 +479,25 @@ app.use(
 );
 
 //set up storage engine (files will be stored in 'uploads' folder)
+// Configure multer storage to save files in user-specific directories
+
+app.use("/uploads", express.static("uploads"));
+
 const storage = multer.diskStorage({
-  destination: "uploads/", //save files to 'uploads' folder
+  destination: (req, file, cb) => {
+    const uploadFolder = path.join(__dirname, "uploads");
+    if (!fs.existsSync(uploadFolder)) {
+      fs.mkdirSync(uploadFolder, { recursive: true });
+    }
+    cb(null, uploadFolder);
+  },
   filename: (req, file, cb) => {
-    //cb = callback function : cb is used to provide the result of the operation to Multer
-    cb(null, `${Date.now()}-${file.originalname}`); // Unique filename)
+    cb(null, `${Date.now()}-${file.originalname}`);
   },
 });
+
+//now user_id is correctly extracted
+// from the JWT token, and the folder is created before storage.
 
 //configure multer with file size limit (5 mb max)
 const upload = multer({
@@ -503,7 +516,9 @@ const upload = multer({
 
     if (!allowedTypes.includes(file.mimetype)) {
       return cb(
-        new Error("Invalid file type. Only JPG, PNG, PDF, and MP3 allowed.")
+        new Error(
+          "Invalid file type. Only JPG, PNG, PDF, MP3, MP4, AVI, and MOV allowed."
+        )
       );
     }
     cb(null, true);
@@ -513,31 +528,52 @@ const upload = multer({
 //// File upload endpoint (Authenticated users only)
 
 //to get the files via /uploads/ {filename}
-app.use("/uploads", express.static("uploads"));
+//app.use("/uploads", express.static(path.resolve(__dirname, "uploads")));
 
 app.post(
   "/upload",
   authenticateToken,
-  upload.single("file"),
+  (req, res, next) => {
+    console.log("🔥 Upload route hit!");
+
+    upload.single("file")(req, res, (err) => {
+      if (err) {
+        console.error("🚨 Multer Upload Error:", err.message);
+        return res.status(400).json({ error: err.message });
+      }
+      console.log("✅ Multer processed the file.");
+      next();
+    });
+  },
   async (req, res) => {
+    console.log("🔍 Checking request...");
+
     try {
-      console.log("FIle Upload: ", req.file); //log in just in case errors arise
+      console.log("🔹 Full Request:", req.headers, req.body, req.file);
 
-      const filePath = req.file.path; //path where the file is stored
-      const user_id = req.user.user_id; //get user ID from token
+      if (!req.file) {
+        console.error("❌ No file uploaded!");
+        return res.status(400).json({ error: "No file uploaded." });
+      }
 
-      //save file reference in the database
+      console.log("✅ File uploaded: ", req.file.path);
+
+      const filePath = `uploads/${req.file.filename}`;
+      const user_id = req.user.user_id;
+
       const result = await pool.query(
-        "INSERT INTO ideas (user_id, title, file_path) VALUES ($1,$2,$3) RETURNING *",
+        "INSERT INTO ideas (user_id, title, file_path) VALUES ($1, $2, $3) RETURNING *",
         [user_id, req.file.originalname, filePath]
       );
+
+      console.log("💾 Saved to Database:", result.rows[0]);
 
       res.json({
         message: "File uploaded successfully!",
         file: result.rows[0],
       });
     } catch (err) {
-      console.error("Upload Error:", err.message);
+      console.error("🔥 Upload Error:", err.message);
       res.status(500).json({ error: "File upload failed." });
     }
   }
@@ -549,30 +585,35 @@ app.get("/files/:id", authenticateToken, async (req, res) => {
     const { id } = req.params;
     console.log(`Fetching file with ID: ${id}`); // Debugging
 
-    const result = await pool.query("SELECT * FROM ideas WHERE id = $1", [id]);
+    const result = await pool.query(
+      "SELECT * FROM ideas WHERE id = $1 AND user_id = $2",
+      [id, req.user.user_id]
+    );
 
     if (result.rows.length === 0) {
-      console.log("❌ No file found for this ID."); // Debugging
+      console.log("Unauthorized or missing file."); // Debugging
       return res.status(404).json({ error: "File not found" });
     }
 
     const file = result.rows[0];
-    console.log("✅ File Retrieved:", file); // Debugging
+    const fileURL = `http://localhost:3000/uploads/${path.basename(
+      file.file_path
+    )}`;
+    //This ensures Windows-style paths are correctly converted.
 
-    // Convert Windows-style backslashes to forward slashes
-    const correctedPath = file.file_path.replace(/\\/g, "/");
-    const fileUrl = `http://localhost:3000/${correctedPath}`;
-    console.log("✅ Corrected File URL:", fileUrl); // Debugging
+    console.log("Generated File URL:", fileURL); // Debugging
 
-    res.json({ file_url: fileUrl });
+    res.json({ file_url: fileURL });
   } catch (err) {
-    console.error("❌ File Retrieval Error:", err.message);
+    console.error("File Retrieval Error:", err.message);
     res.status(500).json({ error: "Server Error" });
   }
 });
 
 // Serve static files from the uploads directory
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+
+//app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 app.post("/cleanup-missing-files", async (req, res) => {
   try {
@@ -651,7 +692,17 @@ async function cleanupOrphanedFiles() {
 }
 
 // Run the cleanup function every 24 hours (Optional), runs every night to remove broken file records!
+
 cron.schedule("0 0 * * *", cleanupOrphanedFiles);
+
+//log the routes being used to check they are being recoginzed ...
+
+console.log(
+  "Registered Routes:",
+  app._router.stack
+    .filter((r) => r.route) // Only routes, not middleware
+    .map((r) => r.route.path)
+);
 
 app.listen(port, () => {
   console.log(`Server is listening on port ${port}`);
