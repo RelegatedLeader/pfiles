@@ -704,6 +704,76 @@ console.log(
     .map((r) => r.route.path)
 );
 
+//this route is to rename the file  in the file systme
+app.put("/files/:id/rename", authenticateToken, async (req, res) => {
+  try {
+    console.log("🔹 Received Rename Request:", req.body);
+
+    const { id } = req.params;
+    const { newName } = req.body;
+    const user_id = req.user.user_id;
+
+    if (!newName || newName.trim() === "") {
+      console.error("❌ Invalid newName received:", newName);
+      return res.status(400).json({ error: "New file name is required." });
+    }
+
+    console.log(`🔍 Renaming file ID ${id} to ${newName}`);
+
+    // Fetch the file record from the database
+    const result = await pool.query(
+      "SELECT * FROM ideas WHERE id = $1 AND user_id = $2",
+      [id, user_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "File not found or unauthorized." });
+    }
+
+    const file = result.rows[0];
+    let oldPath = path.join(__dirname, file.file_path); // Ensure absolute path
+
+    console.log(`🔍 Checking if file exists: ${oldPath}`);
+    if (!fs.existsSync(oldPath)) {
+      console.error(`🚨 File not found: ${oldPath}`);
+      return res
+        .status(404)
+        .json({ error: "File not found in the filesystem." });
+    }
+
+    const fileExt = path.extname(oldPath); // Get file extension
+    const newFilePath = path.join(__dirname, "uploads", `${newName}${fileExt}`);
+
+    console.log(`🔄 Renaming: ${oldPath} ➝ ${newFilePath}`);
+
+    // Rename the file in the filesystem
+    fs.rename(oldPath, newFilePath, async (err) => {
+      if (err) {
+        console.error("⚠️ Error renaming file:", err.message);
+        return res.status(500).json({ error: "File renaming failed." });
+      }
+
+      // Update the database with the new file path (stored as relative path)
+      const relativeNewPath = `uploads/${newName}${fileExt}`;
+      await pool.query("UPDATE ideas SET file_path = $1 WHERE id = $2", [
+        relativeNewPath,
+        id,
+      ]);
+
+      console.log("✅ Rename successful!");
+      res.json({ message: "File renamed successfully!", newFilePath });
+    });
+  } catch (err) {
+    console.error("🔥 File Renaming Error:", err.message);
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+/**Fetches the file info from the database
+Renames the file in the filesystem
+Updates the database with the new file name
+Returns a success response */
+
 app.listen(port, () => {
   console.log(`Server is listening on port ${port}`);
 });
