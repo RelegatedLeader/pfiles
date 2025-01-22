@@ -53,9 +53,18 @@ console.log(
   process.env.JWT_REFRESH_SECRET ? "✔️ Loaded" : "❌ Missing"
 );
 
+app.use((req, res, next) => {
+  console.log(`🚀 Incoming Request: ${req.method} ${req.url}`);
+  next();
+});
+
 // Log incoming requests before defining routes
 app.use((req, res, next) => {
-  console.log(`Received request: ${req.method} ${req.url}`);
+  console.log(
+    `🚀 [${req.method}] ${req.url} -> Matched route: ${
+      req.route ? req.route.path : "None"
+    }`
+  );
   next();
 });
 
@@ -560,10 +569,11 @@ app.post(
 
       const filePath = `uploads/${req.file.filename}`;
       const user_id = req.user.user_id;
+      const tags = req.body.tags ? JSON.parse(req.body.tags) : []; // Convert string to array
 
       const result = await pool.query(
-        "INSERT INTO ideas (user_id, title, file_path) VALUES ($1, $2, $3) RETURNING *",
-        [user_id, req.file.originalname, filePath]
+        "INSERT INTO ideas (user_id, title, file_path, tags) VALUES ($1, $2, $3, $4) RETURNING *",
+        [user_id, req.file.originalname, filePath, JSON.stringify(tags)]
       );
 
       console.log("💾 Saved to Database:", result.rows[0]);
@@ -580,7 +590,84 @@ app.post(
 );
 
 //gets the files within the database
+// ✅ Define /files/searching first (before /files/:id)
+app.get("/files/searching", authenticateToken, async (req, res) => {
+  console.log("🚀 Route /files/searching is being executed...");
+
+  try {
+    const { tag } = req.query;
+    const user_id = req.user.user_id;
+
+    if (!tag) {
+      console.log("❌ Missing tag in request");
+      return res.status(400).json({ error: "Tag is required for search" });
+    }
+
+    console.log(`🔍 Searching for files with tag: ${tag} for user: ${user_id}`);
+
+    const query = `
+      SELECT * FROM ideas
+      WHERE user_id = $1
+        AND tags IS NOT NULL
+        AND tags @> $2::jsonb
+    `;
+    const params = [user_id, JSON.stringify([tag])];
+
+    console.log("🛠️ Executing Query:", query);
+    console.log("📌 Query Parameters:", params);
+
+    const result = await pool.query(query, params);
+
+    console.log(`✅ Found ${result.rows.length} matching files`);
+    console.log("📂 Result Data:", result.rows);
+
+    return res.json({ files: result.rows });
+  } catch (err) {
+    console.error("🔥 Search Error:", err.stack);
+    return res
+      .status(500)
+      .json({ error: "Server Error", details: err.message });
+  }
+});
+
+// ✅ Then place the /files/:id route AFTER /files/searching
 app.get("/files/:id", authenticateToken, async (req, res) => {
+  const { id } = req.params;
+
+  // 🔹 Ensure ID is a valid number before querying the database
+  if (!/^\d+$/.test(id)) {
+    console.log(`❌ Invalid ID received: ${id}`);
+    return res.status(400).json({ error: "Invalid file ID format" });
+  }
+
+  console.log(`Fetching file with ID: ${id}`);
+
+  try {
+    const result = await pool.query(
+      "SELECT * FROM ideas WHERE id = $1 AND user_id = $2",
+      [id, req.user.user_id]
+    );
+
+    if (result.rows.length === 0) {
+      console.log("🚫 File not found or unauthorized.");
+      return res.status(404).json({ error: "File not found" });
+    }
+
+    const file = result.rows[0];
+    const fileURL = `http://localhost:3000/uploads/${path.basename(
+      file.file_path
+    )}`;
+
+    console.log("✅ File URL:", fileURL);
+    res.json({ file_url: fileURL });
+  } catch (err) {
+    console.error("🔥 File Retrieval Error:", err.message);
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+/** keeping it jsut in case it is needed 
+ * app.get("/files/:id", authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     console.log(`Fetching file with ID: ${id}`); // Debugging
@@ -610,6 +697,7 @@ app.get("/files/:id", authenticateToken, async (req, res) => {
   }
 });
 
+ */
 // Serve static files from the uploads directory
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
@@ -709,10 +797,15 @@ app.put("/files/:id/rename", authenticateToken, async (req, res) => {
   try {
     console.log("🔹 Received Rename Request:", req.body);
 
-    const { id } = req.params;
-    const { newName } = req.body;
-    const user_id = req.user.user_id;
+    //js destructuring
+    const { id } = req.params; //Extracted from the URL path parameter (e.g., /files/:id/rename where :id is dynamic).
+    const { newName } = req.body; //Extracted from the request body (sent as JSON in a PUT request).
+    const user_id = req.user.user_id; //Comes from the authenticated JWT token (attached to req.user by authenticateToken).
+    /**How this works:
 
+The id (10) is taken from the URL.
+The newName (new_image_name) is taken from the body.
+The user_id is extracted from the JWT token that was verified. */
     if (!newName || newName.trim() === "") {
       console.error("❌ Invalid newName received:", newName);
       return res.status(400).json({ error: "New file name is required." });
