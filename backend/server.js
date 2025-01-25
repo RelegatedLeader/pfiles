@@ -630,6 +630,33 @@ app.get("/files/searching", authenticateToken, async (req, res) => {
   }
 });
 
+// ✅ Place this route BEFORE /files/:id to avoid conflicts
+//express routes are sequential
+////get all the files in the group
+
+app.get("/files/group/:groupName", authenticateToken, async (req, res) => {
+  const { groupName } = req.params;
+
+  try {
+    console.log(`🔍 Searching for group: ${groupName}`);
+
+    const result = await pool.query(
+      `SELECT ideas.* FROM ideas
+       JOIN groups ON ideas.group_id = groups.id
+       WHERE LOWER(groups.name) = LOWER($1)`,
+      [groupName]
+    );
+
+    console.log(`✅ Found ${result.rows.length} files in group ${groupName}`);
+    console.log("📂 File Data:", result.rows);
+
+    res.json({ group: groupName, files: result.rows });
+  } catch (err) {
+    console.error("🔥 Server Error:", err.message);
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
 // ✅ Then place the /files/:id route AFTER /files/searching
 app.get("/files/:id", authenticateToken, async (req, res) => {
   const { id } = req.params;
@@ -662,6 +689,72 @@ app.get("/files/:id", authenticateToken, async (req, res) => {
     res.json({ file_url: fileURL });
   } catch (err) {
     console.error("🔥 File Retrieval Error:", err.message);
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+//now we are working on grouping , so we will add a put
+//add remove tags for a file
+app.put("/files/:id/tags", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { tags } = req.body;
+    const user_id = req.user.user_id;
+
+    if (!array.isArray(tags)) {
+      return res.status(400).json({ error: "Tags must be an array" });
+    }
+
+    //fetch the file
+    const result = await pool.query(
+      "SELECT * FROM ideas WHERE id = $1 AND user_id = $2",
+      [id, user_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: "File not found or unauthorized" });
+    }
+
+    //update the tags in the database
+    await pool.query("UPDATE ideas SET tags = $1 WHERE id = $2", [
+      JSON.stringify(tags),
+      id,
+    ]);
+    res.json({ message: "Tags updated successfully!" });
+  } catch (err) {
+    console.error("�� Tag Update Errorr:", err.message);
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+// BULK TAGGING
+app.put("/files/bulk-tags", authenticateToken, async (req, res) => {
+  try {
+    const { file_ids, tags } = req.body;
+    const user_id = req.user.user_id;
+
+    if (!Array.isArray(file_ids) || !Array.isArray(tags)) {
+      return res.status(400).json({ error: "Invalid input format" });
+    }
+
+    let updateCount = 0;
+
+    for (const id of file_ids) {
+      const result = await pool.query(
+        "SELECT * FROM ideas WHERE id = $1 AND user_id = $2",
+        [id, user_id]
+      );
+      if (result.rows.length > 0) {
+        await pool.query("UPDATE ideas SET tags = $1 WHERE id = $2", [
+          JSON.stringify(tags),
+          id,
+        ]);
+        updatedCount++;
+      }
+    }
+    res.json({ message: `Tags updated for ${updatedCount} files.` });
+  } catch (err) {
+    console.error("Bulk Tagging Error:", err.message);
     res.status(500).json({ error: "Server Error" });
   }
 });
@@ -866,6 +959,54 @@ The user_id is extracted from the JWT token that was verified. */
 Renames the file in the filesystem
 Updates the database with the new file name
 Returns a success response */
+
+//a new table for groups was create with the ideao f normalization of the database by creating a new table for
+//the "groups" of different types of data
+
+//to create a new group
+app.post("/groups", authenticateToken, async (req, res) => {
+  const { name } = req.body;
+
+  if (!name) return res.status(400).json({ error: "Group name is required!" });
+  try {
+    const result = await pool.query(
+      "INSERT INTO groups (name) VALUES ($1) RETURNING *",
+      [name]
+    );
+    res.json({ message: "Group created!", group: result.rows[0] });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).json({ error: "Server Error" });
+  }
+});
+
+//assign a file to a group
+app.put("/files/:id/group", authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { groupName } = req.body;
+
+  if (!groupName) {
+    return res.status(400).json({ error: "Group name is required!" });
+  }
+
+  try {
+    const groupResult = await pool.query(
+      "INSERT INTO groups (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
+      [groupName]
+    );
+    const groupId = groupResult.rows[0].id;
+
+    // Assign the file to the group
+    await pool.query("UPDATE ideas SET group_id = $1 WHERE id = $2", [
+      groupId,
+      id,
+    ]);
+    res.json({ message: `File assigned to group: ${groupName}` });
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).json({ error: "Server Error" });
+  }
+});
 
 app.listen(port, () => {
   console.log(`Server is listening on port ${port}`);
