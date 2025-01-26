@@ -28,7 +28,25 @@ console.log(process.env);
 const app = express();
 
 const port = process.env.PORT || 3000;
+// ✅ Apply Helmet security headers early in the middleware stack
+app.use(
+  helmet({
+    contentSecurityPolicy: false, // Optional: Disable CSP if causing issues
+    frameguard: { action: "deny" }, // Prevent clickjacking
+    hsts: { maxAge: 31536000, includeSubDomains: true, preload: true }, // Enforce HTTPS
+    referrerPolicy: { policy: "no-referrer" }, // Hide referrer information
+    xssFilter: true, // Mitigate XSS attacks
+    noSniff: true, // Prevent MIME-type sniffing
+  })
+);
 
+// ✅ CORS Configuration (Keep it after Helmet)
+const corsOptions = {
+  origin: ["http://localhost:3000"], // Update for production
+  methods: "GET,POST,PUT,DELETE",
+  allowedHeaders: "Content-Type,Authorization",
+};
+app.use(cors(corsOptions));
 //postgreSQL connection setup
 
 app.use(express.json()); // Middleware to parse JSON bodies
@@ -109,24 +127,41 @@ app.get("/ideas", authenticateToken, async (req, res) => {
 });
 
 //now to inserting
+//now with protections against Cross Siet Scripting and SQL IJECTION
+app.post(
+  "/users",
+  [
+    //prevents invalid emails and makes sure they are formatted correctly
+    //helps from xxs cross script attacks and sql injection
+    body("email")
+      .trim()
+      .isEmail()
+      .normalizeEmail()
+      .withMessage("Invalid email format"),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
 
-app.post("/users", async (req, res) => {
-  const { email } = req.body; //extract email from the request body
+    const { email } = req.body;
 
-  try {
-    const result = await pool.query(
-      "INSERT INTO users (email) VALUES ($1) RETURNING *",
-      //$1 in the Query: Placeholder for dynamic values (to prevent SQL injection).
-
-      [email]
-    );
-
-    res.json(result.rows[0]);
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).json({ error: err.message }); // Now correctly sends the error message
+    try {
+      const result = await pool.query(
+        "INSERT INTO users (email) VALUES ($1) RETURNING *",
+        [email]
+      );
+      res.json(result.rows[0]);
+    } catch (err) {
+      if (err.code === "23505") {
+        return res.status(400).json({ error: "Email already exists." });
+      }
+      console.error("Database Error:", err.message);
+      res.status(500).json({ error: "An unexpected error occurred." });
+    }
   }
-});
+);
 
 app.post("/hashes", async (req, res) => {
   const { user_id, hash_code } = req.body; // extract data from the request body
@@ -144,21 +179,41 @@ app.post("/hashes", async (req, res) => {
   }
 });
 
-app.post("/ideas", async (req, res) => {
-  const { user_id, title, content, file_path } = req.body; //extract data from the request body
+app.post(
+  "/ideas",
+  // Sanitizes title and content to prevent malicious scripts from being stored.
+  // Ensures file_path is a valid string.
+  [
+    body("title")
+      .trim()
+      .escape()
+      .isLength({ min: 1 })
+      .withMessage("Title is required."),
+    body("content").optional().trim().escape(),
+    body("file_path").isString().withMessage("Invalid file path."),
+  ],
 
-  try {
-    const result = await pool.query(
-      "INSERT INTO ideas (user_id, title, content, file_path) VALUES ($1, $2,$3, $4) RETURNING *",
-      [user_id, title, content, file_path]
-    );
+  async (req, res) => {
+    //see if errors are found
+    const errors = validationResult(req);
+    if (!errors.isEmpty())
+      return res.status(400).json({ errors: errors.array() });
 
-    res.json(result.rows[0]); // Respond with the newly created idea
-  } catch (err) {
-    console.log(err.message);
-    res.status(500).send("Server Error");
+    const { user_id, title, content, file_path } = req.body;
+
+    try {
+      const result = await pool.query(
+        "INSERT INTO ideas (user_id, title, content, file_path) VALUES ($1, $2, $3, $4) RETURNING *",
+        [user_id, title, content, file_path]
+      );
+
+      res.json(result.rows[0]);
+    } catch (err) {
+      console.log(err.message);
+      res.status(500).send("Server Error");
+    }
   }
-});
+);
 
 ///testing database connection before any routes
 pool.query("select now()", (err, res) => {
@@ -262,62 +317,68 @@ const loginLimiter = rateLimit({
 //it is modified to be able to refresh tokens to avoid using frequent logins!
 app.post(
   "/login",
-  loginLimiter,
+  loginLimiter, // Limits login attempts to prevent brute force attacks, this isthe rate limit from express
   [
-    //this is from the express-validator
     body("hash_code")
-      .isLength({ min: 32, max: 32 })
-      .withMessage("Invalid hash format"),
+      .trim() // Removes whitespace from start and end to avoid issues with input
+      .isLength({ min: 32, max: 32 }) // Ensures the hash is exactly 32 characters long (avoiding SQL injection attempts)
+      .matches(/^[a-fA-F0-9]+$/) // Only allows valid hexadecimal characters (prevents malicious injections)
+      .withMessage("Invalid hash format"), // If the hash is incorrect, return an error message
   ],
   async (req, res) => {
-    console.log("Login route hit!"); // Debugging
-    console.log("Received hash_code:", req.body.hash_code); // Debugging
+    console.log("🔑 Login route hit!"); // Debugging: Log that the login route is accessed
+    console.log("Received hash_code:", req.body.hash_code); // Debugging: Check the provided hash
 
-    //from express-validator that is used to prevent xxs and SQL injection attacks
+    //from express-validator that is used to prevent XSS and SQL injection attacks
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
+      console.log("❌ Validation Errors:", errors.array()); // Log validation errors
       return res.status(400).json({ errors: errors.array() });
-    } //now  requests with invalid hash_code formats will be rejected before reaching the database.
+    }
 
-    const { hash_code } = req.body; //gets hash from user input
+    const { hash_code } = req.body; // Extracts hash from user input
 
     try {
+      console.log("🔍 Checking hash validity in database...");
       const result = await pool.query(
         "SELECT * FROM hashes WHERE hash_code = $1 AND expires_at > NOW()",
         [hash_code]
       );
 
       if (result.rows.length === 0) {
+        console.log("❌ Invalid or expired hash provided.");
         return res.status(401).json({ error: "Invalid or expired hash." });
       }
 
-      const user_id = result.rows[0].user_id;
+      const user_id = result.rows[0].user_id; // Retrieve the user ID linked to the hash
 
-      // Generate Access Token (Short-lived)
+      console.log("✅ Hash verified, generating tokens...");
+
+      // Generate Access Token (Short-lived, used for authentication)
       const accessToken = jwt.sign({ user_id }, process.env.JWT_SECRET, {
-        expiresIn: "30d",
+        expiresIn: "30d", // Token is valid for 30 days
       });
 
-      // Generate Refresh Token (Longer-lived)
+      // Generate Refresh Token (Longer-lived, used to renew access tokens)
       const refreshToken = jwt.sign(
         { user_id },
         process.env.JWT_REFRESH_SECRET,
         {
-          expiresIn: "60d",
+          expiresIn: "60d", // Refresh token lasts for 60 days
         }
       );
 
-      //users now receive a refresh token that allows them to get a new access token without logging in again
-
-      // Store refresh token in DB
+      console.log("💾 Storing refresh token in database...");
+      // Store refresh token in DB (allows revocation if needed)
       await pool.query(
         "INSERT INTO refresh_tokens (user_id, token) VALUES ($1, $2)",
         [user_id, refreshToken]
       );
 
-      res.json({ accessToken, refreshToken });
+      console.log("🎉 Login successful! Tokens issued.");
+      res.json({ accessToken, refreshToken }); // Return tokens to the user
     } catch (err) {
-      console.error(err.message);
+      console.error("🔥 Server Error:", err.message);
       res.status(500).json({ error: "Server Error" });
     }
   }
@@ -472,20 +533,8 @@ Input Validation & Sanitization	Prevents SQL injection & XSS
 HSTS (Strict Transport Security)	Forces HTTPS for added security */
 
 // Restrict API access to specific origins
-const corsOptions = {
-  origin: ["http://localhost:3000"], // Update this to your frontend URL when deployed
-  methods: "GET,POST,PUT,DELETE",
-  allowedHeaders: "Content-Type,Authorization",
-};
+
 //now only the frontend can access the API, blocking external malicious requests.
-
-app.use(cors(corsOptions));
-
-// Apply security headers
-app.use(helmet()); // now the API has additional protection against common attacks
-app.use(
-  helmet.hsts({ maxAge: 31536000, includeSubDomains: true, preload: true }) //now the browser will always use HTTPS if available.
-);
 
 //set up storage engine (files will be stored in 'uploads' folder)
 // Configure multer storage to save files in user-specific directories
@@ -701,7 +750,8 @@ app.put("/files/:id/tags", authenticateToken, async (req, res) => {
     const { tags } = req.body;
     const user_id = req.user.user_id;
 
-    if (!array.isArray(tags)) {
+    if (!Array.isArray(tags)) {
+      //lowercase array is not a valid js object
       return res.status(400).json({ error: "Tags must be an array" });
     }
 
@@ -749,10 +799,10 @@ app.put("/files/bulk-tags", authenticateToken, async (req, res) => {
           JSON.stringify(tags),
           id,
         ]);
-        updatedCount++;
+        updateCount++;
       }
     }
-    res.json({ message: `Tags updated for ${updatedCount} files.` });
+    res.json({ message: `Tags updated for ${updateCount} files.` });
   } catch (err) {
     console.error("Bulk Tagging Error:", err.message);
     res.status(500).json({ error: "Server Error" });
@@ -818,12 +868,13 @@ app.post("/cleanup-missing-files", async (req, res) => {
 });
 
 // DELETE endpoint to remove a file
+// DELETE endpoint to remove a file
 app.delete("/files/:id", authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const user_id = req.user.user_id;
 
-    console.log(`Received DELETE request for file ID: ${id}`); // Debugging
+    console.log(`Received DELETE request for file ID: ${id}`);
 
     // Retrieve file info from the database
     const result = await pool.query(
@@ -836,7 +887,20 @@ app.delete("/files/:id", authenticateToken, async (req, res) => {
       return res.status(404).json({ error: "File not found or unauthorized" });
     }
 
-    const filePath = result.rows[0].file_path;
+    const filePath = path.join(__dirname, result.rows[0].file_path);
+
+    console.log(`Attempting to delete file: ${filePath}`);
+
+    // Check if the file exists before trying to delete it
+    if (!fs.existsSync(filePath)) {
+      console.warn(`File does not exist: ${filePath}, deleting from DB only.`);
+
+      // Remove file reference from the database even if the file is missing
+      await pool.query("DELETE FROM ideas WHERE id = $1", [id]);
+      return res.json({
+        message: "File entry removed from database (file was already missing).",
+      });
+    }
 
     // Delete the file from the server storage
     fs.unlink(filePath, async (err) => {
@@ -916,8 +980,10 @@ The user_id is extracted from the JWT token that was verified. */
       return res.status(404).json({ error: "File not found or unauthorized." });
     }
 
-    const file = result.rows[0];
+    const file = result.rows[0]; //remember that this is basically an object
     let oldPath = path.join(__dirname, file.file_path); // Ensure absolute path
+    //__dirname is a Node.js environment variable that provides the absolute path
+    //  to the directory containing the currently executing JavaScript file
 
     console.log(`🔍 Checking if file exists: ${oldPath}`);
     if (!fs.existsSync(oldPath)) {
@@ -994,6 +1060,7 @@ app.put("/files/:id/group", authenticateToken, async (req, res) => {
       "INSERT INTO groups (name) VALUES ($1) ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id",
       [groupName]
     );
+    console.log("🚀 Group Insert Result:", groupResult.rows); // Add this for debugging
     const groupId = groupResult.rows[0].id;
 
     // Assign the file to the group
