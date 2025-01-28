@@ -14,6 +14,14 @@ const multer = require("multer"); //to upload files securely
 const path = require("path"); ///was added with the multer above
 const fs = require("fs"); // File system module for deletion
 
+//these two are for adding a thumnail for images and videos after uploading them, they will be applied
+// to the /upload route
+const sharp = require("sharp"); //size and format < -- can be used to compress images
+const ffmpeg = require("fluent-ffmpeg"); // (for duration, resolution, and format) <-- can be used to compress videos
+
+//pdf-lib is used for adding metadata to PDF files
+const { PDFDocument } = require("pdf-lib"); // For PDF metadata
+
 //Clickjacking is a malicious technique where an attacker tricks a user into clicking on something
 //  different from what they perceive, potentially
 //  revealing confidential information or allowing the attacker to take control of their computer.
@@ -560,7 +568,7 @@ const storage = multer.diskStorage({
 //configure multer with file size limit (5 mb max)
 const upload = multer({
   storage: storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, //5mb limit
+  limits: { fileSize: 50 * 1024 * 1024 }, //50mb limit (because of the possible add on of videos)
   fileFilter: (req, file, cb) => {
     const allowedTypes = [
       "image/jpeg",
@@ -579,6 +587,15 @@ const upload = multer({
         )
       );
     }
+
+    // 🔹 Custom file size check per type
+    if (
+      (file.mimetype.startsWith("image/") && file.size > 10 * 1024 * 1024) || // 10MB for images
+      (file.mimetype.startsWith("video/") && file.size > 50 * 1024 * 1024) // 50MB for videos
+    ) {
+      return cb(new Error("❌ File too large. Max size exceeded!"));
+    } // now, files over the size limit will be rejected immediately -> this is for storare safety
+
     cb(null, true);
   },
 });
@@ -587,7 +604,13 @@ const upload = multer({
 
 //to get the files via /uploads/ {filename}
 //app.use("/uploads", express.static(path.resolve(__dirname, "uploads")));
+const thumbnailDir = path.join(__dirname, "uploads/thumbnails");
+if (!fs.existsSync(thumbnailDir)) {
+  fs.mkdirSync(thumbnailDir, { recursive: true });
+}
 
+// Modify /upload to handle compression & thumbnails
+// Modify /upload to handle file versioning
 app.post(
   "/upload",
   authenticateToken,
@@ -605,30 +628,136 @@ app.post(
   },
   async (req, res) => {
     console.log("🔍 Checking request...");
-
     try {
-      console.log("🔹 Full Request:", req.headers, req.body, req.file);
-
       if (!req.file) {
         console.error("❌ No file uploaded!");
         return res.status(400).json({ error: "No file uploaded." });
       }
 
-      console.log("✅ File uploaded: ", req.file.path);
+      console.log("✅ File uploaded:", req.file.path);
 
       const filePath = `uploads/${req.file.filename}`;
       const user_id = req.user.user_id;
       const tags = req.body.tags ? JSON.parse(req.body.tags) : []; // Convert string to array
+      const fileExt = path.extname(req.file.filename).toLowerCase();
+      let thumbnailPath = null;
+      let metadata = {};
+      let compressedFilePath = filePath;
 
+      const imageTypes = [".jpg", ".jpeg", ".png"];
+      const videoTypes = [".mp4", ".avi", ".mov"];
+      const pdfTypes = [".pdf"];
+
+      /** 🖼️ Process Image Metadata & Compression */
+      if (imageTypes.includes(fileExt)) {
+        const imageMetadata = await sharp(req.file.path).metadata();
+        metadata = {
+          width: imageMetadata.width,
+          height: imageMetadata.height,
+          format: imageMetadata.format,
+          size: req.file.size,
+        };
+
+        // Generate Thumbnail
+        const thumbnailFilename = `thumb-${Date.now()}-${req.file.filename}`;
+        thumbnailPath = `uploads/thumbnails/${thumbnailFilename}`;
+
+        await sharp(req.file.path)
+          .resize(200, 200)
+          .toFile(path.join(__dirname, thumbnailPath));
+
+        console.log("🖼️ Image thumbnail created:", thumbnailPath);
+
+        // **Compress Image**
+        compressedFilePath = `uploads/compressed-${req.file.filename}`;
+        await sharp(req.file.path)
+          .resize(1024) // Resize to max width of 1024px
+          .jpeg({ quality: 70 }) // Compress quality to 70%
+          .toFile(path.join(__dirname, compressedFilePath));
+
+        console.log("🖼️ Image compressed:", compressedFilePath);
+      } else if (videoTypes.includes(fileExt)) {
+        /** 🎥 Process Video Metadata & Compression */
+        metadata = await new Promise((resolve, reject) => {
+          ffmpeg.ffprobe(req.file.path, (err, metadata) => {
+            if (err) {
+              console.error("🚨 FFmpeg Metadata Error:", err);
+              return reject(err);
+            }
+            resolve({
+              format: metadata.format.format_name,
+              duration: metadata.format.duration,
+              width: metadata.streams[0]?.width || null,
+              height: metadata.streams[0]?.height || null,
+              size: req.file.size,
+            });
+          });
+        });
+
+        // Generate Thumbnail
+        const thumbnailFilename = `thumb-${Date.now()}.jpg`;
+        thumbnailPath = `uploads/thumbnails/${thumbnailFilename}`;
+
+        await new Promise((resolve, reject) => {
+          ffmpeg(req.file.path)
+            .screenshots({
+              timestamps: ["00:00:01"], // Capture at 1 second mark
+              filename: thumbnailFilename,
+              folder: path.join(__dirname, "uploads/thumbnails"),
+              size: "200x200",
+            })
+            .on("end", () => {
+              console.log("🎥 Video thumbnail created:", thumbnailPath);
+              resolve();
+            })
+            .on("error", (err) => {
+              console.error("🚨 FFmpeg Thumbnail Error:", err);
+              reject(err);
+            });
+        });
+      }
+
+      /** 💾 Check if file exists, if so, store version before overwriting */
+      const existingFile = await pool.query(
+        "SELECT * FROM ideas WHERE title = $1 AND user_id = $2",
+        [req.file.originalname, user_id]
+      );
+
+      if (existingFile.rows.length > 0) {
+        console.log("🔄 Storing previous version before overwriting...");
+        const oldFile = existingFile.rows[0];
+
+        await pool.query(
+          "INSERT INTO file_versions (file_id, user_id, title, file_path, compressed_file_path, metadata) VALUES ($1, $2, $3, $4, $5, $6)",
+          [
+            oldFile.id,
+            user_id,
+            oldFile.title,
+            oldFile.file_path,
+            oldFile.compressed_file_path,
+            oldFile.metadata,
+          ]
+        );
+      }
+
+      /** 💾 Store file data in database */
       const result = await pool.query(
-        "INSERT INTO ideas (user_id, title, file_path, tags) VALUES ($1, $2, $3, $4) RETURNING *",
-        [user_id, req.file.originalname, filePath, JSON.stringify(tags)]
+        "INSERT INTO ideas (user_id, title, file_path, thumbnail_path, compressed_file_path, metadata, tags) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *",
+        [
+          user_id,
+          req.file.originalname,
+          filePath,
+          thumbnailPath,
+          compressedFilePath,
+          JSON.stringify(metadata),
+          JSON.stringify(tags),
+        ]
       );
 
       console.log("💾 Saved to Database:", result.rows[0]);
 
       res.json({
-        message: "File uploaded successfully!",
+        message: "File uploaded & versioned successfully!",
         file: result.rows[0],
       });
     } catch (err) {
@@ -638,8 +767,11 @@ app.post(
   }
 );
 
+// i also added indexes on the database , ex: CREATE INDEX idx_ideas_user_id ON ideas(user_id);
+//to make searching faster
+
 //gets the files within the database
-// ✅ Define /files/searching first (before /files/:id)
+//  Define /files/searching first (before /files/:id)
 app.get("/files/searching", authenticateToken, async (req, res) => {
   console.log("🚀 Route /files/searching is being executed...");
 
@@ -679,7 +811,7 @@ app.get("/files/searching", authenticateToken, async (req, res) => {
   }
 });
 
-// ✅ Place this route BEFORE /files/:id to avoid conflicts
+//  Place this route BEFORE /files/:id to avoid conflicts
 //express routes are sequential
 ////get all the files in the group
 
@@ -705,6 +837,168 @@ app.get("/files/group/:groupName", authenticateToken, async (req, res) => {
     res.status(500).json({ error: "Server Error" });
   }
 });
+
+//this route is different, it is for general search, sorting and filtering,
+//this is for the mere idea of optimization of searching
+///has to be implemented before /file/:id
+
+//example to test: GET /files/search?query=report&type=pdf&sort=name&order=asc
+//basically we are building a SQL query here!
+// 🔹 In-memory cache to store search results for faster retrieval
+const cache = new Map();
+
+app.get("/files/search", authenticateToken, async (req, res) => {
+  try {
+    // Extract query parameters from the request
+    const { query, type, category, sort, order } = req.query;
+    const user_id = req.user.user_id; // Get user ID from the authenticated token
+
+    // Generate a unique cache key based on search filters
+    const cacheKey = `${user_id}-${query}-${type}-${category}-${sort}-${order}`;
+
+    // 🚀 Check if result exists in cache, return it instantly
+    if (cache.has(cacheKey)) {
+      console.log("⚡ Serving from Cache!");
+      return res.json({ files: cache.get(cacheKey) });
+    }
+
+    // Initialize the SQL query to select all files for the authenticated user
+    let sql = `SELECT * FROM ideas WHERE user_id = $1`;
+    let params = [user_id]; // First parameter is always the user ID
+
+    // 🔍 Filter by search query (title matching)
+    if (query) {
+      sql += ` AND LOWER(title) LIKE LOWER($2)`; // Case-insensitive search
+      params.push(`%${query}%`); // Use wildcard (%) for partial matching
+    }
+
+    // 📂 Filter by file extension type (e.g., ".jpg", ".pdf")
+    if (type) {
+      sql += ` AND LOWER(file_path) LIKE LOWER($3)`;
+      params.push(`%.${type}`);
+    }
+
+    // 🏷️ **NEW**: Filtering by category (image, video, pdf)
+    if (category) {
+      const categories = {
+        image: ["jpg", "jpeg", "png"],
+        video: ["mp4", "avi", "mov"],
+        pdf: ["pdf"],
+      };
+
+      if (categories[category]) {
+        const extensions = categories[category]
+          .map((ext) => `'%.${ext}'`) // Convert to SQL LIKE pattern
+          .join(", ");
+        sql += ` AND LOWER(file_path) LIKE ANY (ARRAY[${extensions}])`;
+      }
+    }
+
+    // 📌 Sorting logic (Sort by name, date, size, or type)
+    if (sort) {
+      const validSorts = {
+        name: "title", // Sort by file title
+        date: "created_at", // Sort by creation date
+        size: "metadata->>'size'", // Sort by file size stored in metadata JSON
+        type: "file_path", // Sort by file type
+      };
+
+      if (validSorts[sort]) {
+        const orderBy = order === "desc" ? "DESC" : "ASC";
+        sql += ` ORDER BY ${validSorts[sort]} ${orderBy}`;
+      }
+    }
+
+    // 🚀 Speed Optimization: Use database indexing for faster queries
+    console.log("🔹 Optimizing Query with Indexes...");
+    await pool.query("SET enable_seqscan = OFF"); // Force index usage for faster search
+
+    // 🛠️ Debugging logs to see generated query
+    console.log("🔹 SQL Query:", sql);
+    console.log("🔹 Query Parameters:", params);
+
+    // Execute the optimized query with PostgreSQL
+    const result = await pool.query(sql, params);
+
+    // 🔹 Store result in cache (expires in 5 minutes)
+    cache.set(cacheKey, result.rows);
+    setTimeout(() => cache.delete(cacheKey), 5 * 60 * 1000); // Auto-clear cache after 5 minutes
+
+    // ✅ Return filtered & sorted results
+    res.json({ files: result.rows });
+  } catch (err) {
+    console.error("🔥 Search Error:", err.message);
+    res.status(500).json({ error: "Search failed." });
+  }
+});
+
+//^
+/**Extracts search filters (query, type, sort, order) from the request.
+Starts with a base SQL query that fetches files belonging to the logged-in user.
+Adds search conditions dynamically:
+If a search term (query) is provided, it filters files whose title matches.
+If a file type (type) is provided, it filters files by file extension.
+Handles sorting based on name, date, size, or type.
+Logs the final SQL query for debugging.
+Executes the query and returns the matching files. */
+
+//this is to retrieve and restore previous versions
+app.get("/files/:id/versions", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const user_id = req.user.user_id;
+
+    console.log(`🔍 Fetching versions for file ID: ${id}`);
+
+    const result = await pool.query(
+      "SELECT * FROM file_versions WHERE file_id = $1 AND user_id = $2 ORDER BY created_at DESC",
+      [id, user_id]
+    );
+
+    res.json({ versions: result.rows });
+  } catch (err) {
+    console.error("🔥 Version Fetch Error:", err.message);
+    res.status(500).json({ error: "Failed to fetch file versions." });
+  }
+});
+
+///this is to rollback to previous versions - ex -> an image, there may be two types of it,
+//and we can always roll back to a previous version of the same file, this helps delete
+//the need to restore things if you really think about it, makes it all look clean!
+
+app.put(
+  "/files/:id/rollback/:versionId",
+  authenticateToken,
+  async (req, res) => {
+    try {
+      const { id, versionId } = req.params;
+      const user_id = req.user.user_id;
+
+      console.log(`🔄 Restoring version ${versionId} for file ID: ${id}`);
+
+      const versionResult = await pool.query(
+        "SELECT * FROM file_versions WHERE id = $1 AND user_id = $2",
+        [versionId, user_id]
+      );
+
+      if (versionResult.rows.length === 0) {
+        return res.status(404).json({ error: "Version not found." });
+      }
+
+      const version = versionResult.rows[0];
+
+      await pool.query(
+        "UPDATE ideas SET file_path = $1, compressed_file_path = $2, metadata = $3 WHERE id = $4",
+        [version.file_path, version.compressed_file_path, version.metadata, id]
+      );
+
+      res.json({ message: "File rolled back successfully!" });
+    } catch (err) {
+      console.error("🔥 Rollback Error:", err.message);
+      res.status(500).json({ error: "Rollback failed." });
+    }
+  }
+);
 
 // ✅ Then place the /files/:id route AFTER /files/searching
 app.get("/files/:id", authenticateToken, async (req, res) => {
