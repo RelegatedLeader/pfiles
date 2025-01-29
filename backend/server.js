@@ -13,6 +13,7 @@ const { body, validationResult } = require("express-validator"); //prevents SQL 
 const multer = require("multer"); //to upload files securely
 const path = require("path"); ///was added with the multer above
 const fs = require("fs"); // File system module for deletion
+const archiver = require("archiver"); //returns archive for download
 
 //these two are for adding a thumnail for images and videos after uploading them, they will be applied
 // to the /upload route
@@ -1102,6 +1103,178 @@ app.put("/files/bulk-tags", authenticateToken, async (req, res) => {
     res.status(500).json({ error: "Server Error" });
   }
 });
+
+//delete in bulk based on id- > deletes files from both the database and the storage
+// skips any missing files and logs them
+app.delete("/files/bulk-delete", authenticateToken, async (req, res) => {
+  try {
+    const { file_ids } = req.body;
+    const user_id = req.user.user_id;
+
+    if (!Array.isArray(file_ids) || file_ids.length === 0) {
+      return res.status(400).json({ error: "Invalid file list provided." });
+    }
+
+    let deletedCount = 0;
+    let missingFiles = [];
+
+    for (const id of file_ids) {
+      const result = await pool.query(
+        "SELECT * FROM ideas WHERE id = $1 AND user_id = $2",
+        [id, user_id]
+      );
+
+      if (result.rows.length === 0) {
+        missingFiles.push(id);
+        continue;
+      }
+
+      const file = result.rows[0];
+      const filePath = path.join(__dirname, file.file_path);
+
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath); // Delete the actual file
+      }
+
+      await pool.query("DELETE FROM ideas WHERE id = $1", [id]);
+      deletedCount++;
+    }
+
+    res.json({
+      message: `Deleted ${deletedCount} files.`,
+      missing: missingFiles.length ? missingFiles : "None",
+    });
+  } catch (err) {
+    console.error("🔥 Bulk Deletion Error:", err.message);
+    res.status(500).json({ error: "Bulk file deletion failed." });
+  }
+});
+
+//rename in bulk based on an arrya that has the id and the new name , it is object based
+//it renames the files in both the dababase and filesystem .
+
+app.put("/files/bulk-rename", authenticateToken, async (req, res) => {
+  try {
+    const { files } = req.body;
+    const user_id = req.user.user_id;
+
+    if (!Array.isArray(files) || files.length === 0) {
+      return res.status(400).json({ error: "Invalid file list provided." });
+    }
+
+    let renamedCount = 0;
+    let failedRenames = [];
+
+    for (const { id, newName } of files) {
+      const result = await pool.query(
+        "SELECT * FROM ideas WHERE id = $1 AND user_id = $2",
+        [id, user_id]
+      );
+
+      if (result.rows.length === 0) {
+        failedRenames.push({ id, reason: "File not found or unauthorized" });
+        continue;
+      }
+
+      const file = result.rows[0];
+      const oldPath = path.join(__dirname, file.file_path);
+      const fileExt = path.extname(file.file_path);
+      const newFilePath = path.join(
+        __dirname,
+        "uploads",
+        `${newName}${fileExt}`
+      );
+
+      if (fs.existsSync(oldPath)) {
+        fs.renameSync(oldPath, newFilePath); // Rename file in filesystem
+        await pool.query("UPDATE ideas SET file_path = $1 WHERE id = $2", [
+          `uploads/${newName}${fileExt}`,
+          id,
+        ]);
+        renamedCount++;
+      } else {
+        failedRenames.push({ id, reason: "File missing from storage" });
+      }
+    }
+
+    res.json({
+      message: `Renamed ${renamedCount} files.`,
+      failed: failedRenames.length ? failedRenames : "None",
+    });
+  } catch (err) {
+    console.error("🔥 Bulk Rename Error:", err.message);
+    res.status(500).json({ error: "Bulk file renaming failed." });
+  }
+});
+
+//to download in bulk:
+app.post("/files/bulk-download", authenticateToken, async (req, res) => {
+  // This route handler listens for POST requests to '/files/bulk-download' and requires authentication
+  try {
+    // Destructuring assignment to get 'file_ids' from the request body
+    const { file_ids } = req.body;
+    // Extracting the user_id from the authenticated user object
+    const user_id = req.user.user_id;
+
+    // Check if file_ids is an array and not empty
+    if (!Array.isArray(file_ids) || file_ids.length === 0) {
+      return res.status(400).json({ error: "Invalid file list provided." });
+    }
+
+    // Create a new archive object for creating a zip file with maximum compression
+    const archive = archiver("zip", { zlib: { level: 9 } });
+    // Set the response's Content-Disposition to 'attachment' to prompt a download with name 'files.zip'
+    res.attachment("files.zip");
+
+    // Pipe the archive to the response, meaning the zip data will be streamed directly to the response
+    archive.pipe(res);
+
+    // Loop through each file ID provided in the request
+    for (const id of file_ids) {
+      // Query the database for the file with the given id, ensuring it belongs to the user
+      const result = await pool.query(
+        "SELECT * FROM ideas WHERE id = $1 AND user_id = $2",
+        [id, user_id]
+      );
+
+      // If no file matches the query, skip to the next iteration
+      if (result.rows.length === 0) {
+        console.warn(`Skipping file ID ${id}: Not found.`);
+        continue;
+      }
+
+      // Extract the first (and only) row from the query result
+      const file = result.rows[0];
+      // Construct the full path to the file on the server
+      const filePath = path.join(__dirname, file.file_path);
+
+      // Check if the file exists at the specified path
+      if (fs.existsSync(filePath)) {
+        // If the file exists, add it to the zip archive, using only the filename for the zip entry
+        archive.file(filePath, { name: path.basename(filePath) });
+      } else {
+        // Log a warning if the file does not exist
+        console.warn(`Skipping file ${filePath}: Does not exist.`);
+      }
+    }
+
+    // Finalize the archive, which writes all buffered data and closes the archive
+    archive.finalize();
+  } catch (err) {
+    // Log any errors that occur during the process
+    console.error("🔥 ZIP Download Error:", err.message);
+    // Send an error response if something went wrong during zip creation
+    res.status(500).json({ error: "ZIP file generation failed." });
+  }
+});
+
+// example of what is received ^
+/**{
+  "files": [
+    { "id": 1, "newName": "document_renamed" },
+    { "id": 2, "newName": "image_updated" }
+  ]
+} */
 
 /** keeping it jsut in case it is needed 
  * app.get("/files/:id", authenticateToken, async (req, res) => {
