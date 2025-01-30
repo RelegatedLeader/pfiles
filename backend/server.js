@@ -14,6 +14,8 @@ const multer = require("multer"); //to upload files securely
 const path = require("path"); ///was added with the multer above
 const fs = require("fs"); // File system module for deletion
 const archiver = require("archiver"); //returns archive for download
+const clamd = require("clamdjs");
+const net = require("net"); // For ClamAV TCP scanning
 
 //these two are for adding a thumnail for images and videos after uploading them, they will be applied
 // to the /upload route
@@ -612,6 +614,45 @@ if (!fs.existsSync(thumbnailDir)) {
 
 // Modify /upload to handle compression & thumbnails
 // Modify /upload to handle file versioning
+
+//to make sure we dont get affected by XSS attacks
+const sanitizeFilename = (filename) => {
+  return filename
+    .replace(/[^a-zA-Z0-9_.-]/g, "") // Keep only safe characters
+    .replace(/\.\./g, "") // Remove directory traversal attempts
+    .replace(/^\.+/, ""); // Remove leading dots
+};
+
+//
+const verifyFileIntegrity = (filePath) => {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash("sha256");
+    const stream = fs.createReadStream(filePath);
+
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+    stream.on("error", (err) => reject(err));
+  });
+};
+
+//scam for viruses with clamav
+// Function to scan files using ClamAV via TCP
+const scanFileForViruses = async (filePath) => {
+  try {
+    const scanner = clamd.createScanner("127.0.0.1", 3310); // Connect to ClamAV daemon
+    const result = await scanner.scanFile(filePath);
+
+    if (result.includes("OK")) {
+      return true; // File is clean
+    } else {
+      return false; // Virus detected
+    }
+  } catch (err) {
+    console.error("❌ ClamAV Scan Error:", err.message);
+    return false; // Treat errors as a potential virus detection
+  }
+};
+
 app.post(
   "/upload",
   authenticateToken,
@@ -637,21 +678,53 @@ app.post(
 
       console.log("✅ File uploaded:", req.file.path);
 
-      const filePath = `uploads/${req.file.filename}`;
+      const sanitizedFilename = sanitizeFilename(req.file.originalname);
+      const filePath = `uploads/${Date.now()}-${sanitizedFilename}`;
       const user_id = req.user.user_id;
-      const tags = req.body.tags ? JSON.parse(req.body.tags) : []; // Convert string to array
+      const tags = req.body.tags ? JSON.parse(req.body.tags) : [];
       const fileExt = path.extname(req.file.filename).toLowerCase();
       let thumbnailPath = null;
       let metadata = {};
       let compressedFilePath = filePath;
 
-      const imageTypes = [".jpg", ".jpeg", ".png"];
-      const videoTypes = [".mp4", ".avi", ".mov"];
-      const pdfTypes = [".pdf"];
+      fs.renameSync(req.file.path, filePath); // Rename the file properly
+
+      // 🔍 **Verify File Integrity (Check Hash)**
+      const fileHash = await verifyFileIntegrity(filePath);
+
+      // 🔄 **Prevent Duplicate File Uploads**
+      const existingFile = await pool.query(
+        "SELECT * FROM file_hashes WHERE hash = $1 AND user_id = $2",
+        [fileHash, user_id]
+      );
+
+      if (existingFile.rows.length > 0) {
+        fs.unlinkSync(filePath); // Delete duplicate file
+        console.warn(`⚠️ Duplicate file upload detected: ${filePath}`);
+        return res.status(400).json({ error: "Duplicate file detected." });
+      }
+
+      // 🦠 **Scan File for Viruses**
+      const isSafe = await scanFileForViruses(filePath);
+      if (!isSafe) {
+        fs.unlinkSync(filePath); // Delete infected file
+        console.error("🚨 Virus detected! File deleted.");
+
+        // Log failed upload attempt
+        await pool.query(
+          "INSERT INTO upload_logs (user_id, file_path, error_message) VALUES ($1, $2, $3)",
+          [user_id, filePath, "Virus detected - File rejected"]
+        );
+
+        return res.status(400).json({ error: "File contains a virus!" });
+      }
 
       /** 🖼️ Process Image Metadata & Compression */
+      const imageTypes = [".jpg", ".jpeg", ".png"];
+      const videoTypes = [".mp4", ".avi", ".mov"];
+
       if (imageTypes.includes(fileExt)) {
-        const imageMetadata = await sharp(req.file.path).metadata();
+        const imageMetadata = await sharp(filePath).metadata();
         metadata = {
           width: imageMetadata.width,
           height: imageMetadata.height,
@@ -663,28 +736,24 @@ app.post(
         const thumbnailFilename = `thumb-${Date.now()}-${req.file.filename}`;
         thumbnailPath = `uploads/thumbnails/${thumbnailFilename}`;
 
-        await sharp(req.file.path)
+        await sharp(filePath)
           .resize(200, 200)
           .toFile(path.join(__dirname, thumbnailPath));
 
         console.log("🖼️ Image thumbnail created:", thumbnailPath);
 
-        // **Compress Image**
+        // Compress Image
         compressedFilePath = `uploads/compressed-${req.file.filename}`;
-        await sharp(req.file.path)
-          .resize(1024) // Resize to max width of 1024px
-          .jpeg({ quality: 70 }) // Compress quality to 70%
+        await sharp(filePath)
+          .resize(1024)
+          .jpeg({ quality: 70 })
           .toFile(path.join(__dirname, compressedFilePath));
 
         console.log("🖼️ Image compressed:", compressedFilePath);
       } else if (videoTypes.includes(fileExt)) {
-        /** 🎥 Process Video Metadata & Compression */
         metadata = await new Promise((resolve, reject) => {
-          ffmpeg.ffprobe(req.file.path, (err, metadata) => {
-            if (err) {
-              console.error("🚨 FFmpeg Metadata Error:", err);
-              return reject(err);
-            }
+          ffmpeg.ffprobe(filePath, (err, metadata) => {
+            if (err) return reject(err);
             resolve({
               format: metadata.format.format_name,
               duration: metadata.format.duration,
@@ -700,33 +769,28 @@ app.post(
         thumbnailPath = `uploads/thumbnails/${thumbnailFilename}`;
 
         await new Promise((resolve, reject) => {
-          ffmpeg(req.file.path)
+          ffmpeg(filePath)
             .screenshots({
-              timestamps: ["00:00:01"], // Capture at 1 second mark
+              timestamps: ["00:00:01"],
               filename: thumbnailFilename,
               folder: path.join(__dirname, "uploads/thumbnails"),
               size: "200x200",
             })
-            .on("end", () => {
-              console.log("🎥 Video thumbnail created:", thumbnailPath);
-              resolve();
-            })
-            .on("error", (err) => {
-              console.error("🚨 FFmpeg Thumbnail Error:", err);
-              reject(err);
-            });
+            .on("end", () => resolve())
+            .on("error", reject);
         });
+
+        console.log("🎥 Video thumbnail created:", thumbnailPath);
       }
 
-      /** 💾 Check if file exists, if so, store version before overwriting */
-      const existingFile = await pool.query(
+      /** 🔄 Store Previous Version Before Overwriting */
+      const oldFileResult = await pool.query(
         "SELECT * FROM ideas WHERE title = $1 AND user_id = $2",
         [req.file.originalname, user_id]
       );
 
-      if (existingFile.rows.length > 0) {
-        console.log("🔄 Storing previous version before overwriting...");
-        const oldFile = existingFile.rows[0];
+      if (oldFileResult.rows.length > 0) {
+        const oldFile = oldFileResult.rows[0];
 
         await pool.query(
           "INSERT INTO file_versions (file_id, user_id, title, file_path, compressed_file_path, metadata) VALUES ($1, $2, $3, $4, $5, $6)",
@@ -741,7 +805,7 @@ app.post(
         );
       }
 
-      /** 💾 Store file data in database */
+      /** 💾 Store File Data in Database */
       const result = await pool.query(
         "INSERT INTO ideas (user_id, title, file_path, thumbnail_path, compressed_file_path, metadata, tags) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *",
         [
@@ -755,14 +819,27 @@ app.post(
         ]
       );
 
+      // Store file hash in DB
+      await pool.query(
+        "INSERT INTO file_hashes (file_path, hash, user_id) VALUES ($1, $2, $3)",
+        [filePath, fileHash, user_id]
+      );
+
       console.log("💾 Saved to Database:", result.rows[0]);
 
       res.json({
-        message: "File uploaded & versioned successfully!",
+        message: "File uploaded & verified successfully!",
         file: result.rows[0],
       });
     } catch (err) {
       console.error("🔥 Upload Error:", err.message);
+
+      // Log failed uploads
+      await pool.query(
+        "INSERT INTO upload_logs (user_id, file_path, error_message) VALUES ($1, $2, $3)",
+        [req.user.user_id, req.file ? req.file.path : "N/A", err.message]
+      );
+
       res.status(500).json({ error: "File upload failed." });
     }
   }
