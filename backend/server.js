@@ -16,6 +16,11 @@ const fs = require("fs"); // File system module for deletion
 const archiver = require("archiver"); //returns archive for download
 const clamd = require("clamdjs");
 const net = require("net"); // For ClamAV TCP scanning
+const winston = require("./utils/logger"); // this is a robust error logger located in utils folder
+
+//added at bottom
+const { encryptFile } = require("../backend/utils/encryption");
+const { decryptFile } = require("../backend/utils/encryption");
 
 //these two are for adding a thumnail for images and videos after uploading them, they will be applied
 // to the /upload route
@@ -59,6 +64,14 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 //postgreSQL connection setup
+
+//this is the middle ware to log all incoming requests from the logger.js in utilitie folder
+//placing this right here ensures that every request is logged before reaching
+//your API endpoints
+app.use((req, res, next) => {
+  logger.info(`🚀 Incoming Request: ${req.method} ${req.url}`);
+  next();
+});
 
 app.use(express.json()); // Middleware to parse JSON bodies
 
@@ -680,6 +693,7 @@ app.post(
 
       const sanitizedFilename = sanitizeFilename(req.file.originalname);
       const filePath = `uploads/${Date.now()}-${sanitizedFilename}`;
+      const encryptedFilePath = `uploads/encrypted_${Date.now()}_${sanitizedFilename}`;
       const user_id = req.user.user_id;
       const tags = req.body.tags ? JSON.parse(req.body.tags) : [];
       const fileExt = path.extname(req.file.filename).toLowerCase();
@@ -689,8 +703,12 @@ app.post(
 
       fs.renameSync(req.file.path, filePath); // Rename the file properly
 
+      // 🔐 Encrypt the file before storing
+      await encryptFile(filePath, encryptedFilePath);
+      fs.unlinkSync(filePath); // Remove the unencrypted file after encryption
+
       // 🔍 **Verify File Integrity (Check Hash)**
-      const fileHash = await verifyFileIntegrity(filePath);
+      const fileHash = await verifyFileIntegrity(encryptedFilePath);
 
       // 🔄 **Prevent Duplicate File Uploads**
       const existingFile = await pool.query(
@@ -699,21 +717,21 @@ app.post(
       );
 
       if (existingFile.rows.length > 0) {
-        fs.unlinkSync(filePath); // Delete duplicate file
+        fs.unlinkSync(encryptedFilePath); // Delete duplicate file
         console.warn(`⚠️ Duplicate file upload detected: ${filePath}`);
         return res.status(400).json({ error: "Duplicate file detected." });
       }
 
       // 🦠 **Scan File for Viruses**
-      const isSafe = await scanFileForViruses(filePath);
+      const isSafe = await scanFileForViruses(encryptedFilePath);
       if (!isSafe) {
-        fs.unlinkSync(filePath); // Delete infected file
+        fs.unlinkSync(encryptedFilePath); // Delete infected file
         console.error("🚨 Virus detected! File deleted.");
 
         // Log failed upload attempt
         await pool.query(
           "INSERT INTO upload_logs (user_id, file_path, error_message) VALUES ($1, $2, $3)",
-          [user_id, filePath, "Virus detected - File rejected"]
+          [user_id, encryptedFilePath, "Virus detected - File rejected"]
         );
 
         return res.status(400).json({ error: "File contains a virus!" });
@@ -811,7 +829,7 @@ app.post(
         [
           user_id,
           req.file.originalname,
-          filePath,
+          encryptedFilePath,
           thumbnailPath,
           compressedFilePath,
           JSON.stringify(metadata),
@@ -822,13 +840,13 @@ app.post(
       // Store file hash in DB
       await pool.query(
         "INSERT INTO file_hashes (file_path, hash, user_id) VALUES ($1, $2, $3)",
-        [filePath, fileHash, user_id]
+        [encryptedFilePath, fileHash, user_id]
       );
 
       console.log("💾 Saved to Database:", result.rows[0]);
 
       res.json({
-        message: "File uploaded & verified successfully!",
+        message: "File uploaded, encrypted & verified successfully!",
         file: result.rows[0],
       });
     } catch (err) {
@@ -1411,8 +1429,37 @@ app.post("/cleanup-missing-files", async (req, res) => {
   }
 });
 
+// to download the decrypted file
+app.get("/files/:id/download", authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await pool.query(
+      "SELECT * FROM ideas WHERE id = $1 AND user_id = $2",
+      [id, req.user.user_id]
+    );
+
+    if (result.rows.length === 0)
+      return res.status(404).json({ error: "File not found" });
+
+    const encryptedFilePath = result.rows[0].file_path;
+    const decryptedFilePath = `temp/decrypted_${Date.now()}_${path.basename(
+      encryptedFilePath
+    )}`;
+
+    await decryptFile(encryptedFilePath, decryptedFilePath);
+
+    res.download(decryptedFilePath, (err) => {
+      if (err) console.error("🔥 Download Error:", err.message);
+      fs.unlinkSync(decryptedFilePath); // Cleanup temp decrypted file
+    });
+  } catch (err) {
+    console.error("🔥 File Download Error:", err.message);
+    res.status(500).json({ error: "Failed to download file" });
+  }
+});
+
 // DELETE endpoint to remove a file
-// DELETE endpoint to remove a file
+
 app.delete("/files/:id", authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
@@ -1431,13 +1478,19 @@ app.delete("/files/:id", authenticateToken, async (req, res) => {
       return res.status(404).json({ error: "File not found or unauthorized" });
     }
 
-    const filePath = path.join(__dirname, result.rows[0].file_path);
+    const encryptedFilePath = path.join(__dirname, result.rows[0].file_path);
+    const decryptedFilePath = encryptedFilePath.replace(
+      "encrypted_",
+      "decrypted_"
+    );
 
-    console.log(`Attempting to delete file: ${filePath}`);
+    console.log(`Attempting to decrypt and delete file: ${encryptedFilePath}`);
 
-    // Check if the file exists before trying to delete it
-    if (!fs.existsSync(filePath)) {
-      console.warn(`File does not exist: ${filePath}, deleting from DB only.`);
+    // Check if the encrypted file exists before trying to decrypt & delete it
+    if (!fs.existsSync(encryptedFilePath)) {
+      console.warn(
+        `File does not exist: ${encryptedFilePath}, deleting from DB only.`
+      );
 
       // Remove file reference from the database even if the file is missing
       await pool.query("DELETE FROM ideas WHERE id = $1", [id]);
@@ -1446,17 +1499,24 @@ app.delete("/files/:id", authenticateToken, async (req, res) => {
       });
     }
 
-    // Delete the file from the server storage
-    fs.unlink(filePath, async (err) => {
+    // 🔓 Decrypt the file before deletion (Optional for Audit Logs)
+    await decryptFile(encryptedFilePath, decryptedFilePath);
+
+    // Delete both encrypted and decrypted files
+    fs.unlink(encryptedFilePath, async (err) => {
       if (err) {
         console.error("File deletion error:", err.message);
         return res.status(500).json({ error: "File deletion failed" });
       }
 
+      if (fs.existsSync(decryptedFilePath)) {
+        fs.unlinkSync(decryptedFilePath); // Delete decrypted version too
+      }
+
       // Remove file reference from the database
       await pool.query("DELETE FROM ideas WHERE id = $1", [id]);
 
-      console.log(`File deleted successfully: ${filePath}`);
+      console.log(`File deleted successfully: ${encryptedFilePath}`);
       res.json({ message: "File deleted successfully" });
     });
   } catch (err) {
@@ -1617,6 +1677,17 @@ app.put("/files/:id/group", authenticateToken, async (req, res) => {
     console.error(err.message);
     res.status(500).json({ error: "Server Error" });
   }
+});
+
+//these are to capture unhandled errors
+//you are to replace most console.log() with either logger.info() or logger.error()
+
+process.on("uncaughtException", (err) => {
+  logger.error(`🔥 Uncaught Exception: ${err.message}`);
+});
+
+process.on("unhandledRejection", (err) => {
+  logger.error(`⚠️ Unhandled Rejection: ${err.message}`);
 });
 
 app.listen(port, () => {
