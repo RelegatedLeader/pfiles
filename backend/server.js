@@ -16,7 +16,8 @@ const fs = require("fs"); // File system module for deletion
 const archiver = require("archiver"); //returns archive for download
 const clamd = require("clamdjs");
 const net = require("net"); // For ClamAV TCP scanning
-const winston = require("./utils/logger"); // this is a robust error logger located in utils folder
+const logger = require("./utils/logger"); // this is a robust error logger located in utils folder
+const { swaggerUi, specs } = require("./utils/swaggerConfig"); //helps with api configuration with swagger
 
 //added at bottom
 const { encryptFile } = require("../backend/utils/encryption");
@@ -56,6 +57,9 @@ app.use(
   })
 );
 
+///adds swagger middleware.
+app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(specs));
+console.log("Swagger Docs available at: http://localhost:3000/api-docs");
 // ✅ CORS Configuration (Keep it after Helmet)
 const corsOptions = {
   origin: ["http://localhost:3000"], // Update for production
@@ -64,6 +68,10 @@ const corsOptions = {
 };
 app.use(cors(corsOptions));
 //postgreSQL connection setup
+
+//this is the middleware for swagger  - the api configuration
+app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(specs));
+console.log("Swagger Docs available at: http://localhost:3000/api-docs");
 
 //this is the middle ware to log all incoming requests from the logger.js in utilitie folder
 //placing this right here ensures that every request is logged before reaching
@@ -96,7 +104,10 @@ console.log(
 );
 
 app.use((req, res, next) => {
-  console.log(`🚀 Incoming Request: ${req.method} ${req.url}`);
+  logger.info(`📩 [GET] ${req.originalUrl} - Incoming Request`);
+  logger.info(`🔍 Request Params: ${JSON.stringify(req.params)}`);
+  logger.info(`📝 Request Query: ${JSON.stringify(req.query)}`);
+
   next();
 });
 
@@ -110,14 +121,38 @@ app.use((req, res, next) => {
   next();
 });
 
+/**
+ * @swagger
+ * /:
+ *   get:
+ *     summary: Check if the backend is running
+ *     description: Returns a simple message to confirm the server is online.
+ *     responses:
+ *       200:
+ *         description: Server is running.
+ */
 app.get("/", (req, res) => {
   res.send("PFiles Backend is running!");
 });
 
+/**
+ * @swagger
+ * /users:
+ *   get:
+ *     summary: Fetch all users
+ *     description: Retrieves all users from the database.
+ *     responses:
+ *       200:
+ *         description: A list of users.
+ *       500:
+ *         description: Server error.
+ */
 app.get("/users", async (req, res) => {
   try {
     const result = await pool.query("Select * from users");
     res.json(result.rows);
+    logger.info(`📩 [GET] /users - Fetching all users`);
+
     // Sends the rows returned by the database query as a JSON response
   } catch (err) {
     console.error(err.message);
@@ -127,16 +162,54 @@ app.get("/users", async (req, res) => {
 
 //req is needed simply because it is part of the signature of the whole function
 //it can be used as incoming req from the client (such as the browser, post man etc)
+
+/**
+ * @swagger
+ * /hashes:
+ *   get:
+ *     summary: Fetch all authentication hashes
+ *     description: Retrieves all stored authentication hashes.
+ *     responses:
+ *       200:
+ *         description: A list of authentication hashes.
+ *       500:
+ *         description: Server error.
+ */
+app.get("/hashes", async (req, res) => {
+  try {
+    const result = await pool.query("SELECT * FROM hashes");
+    res.json(result.rows);
+    logger.info(`📩 [GET] /hashes - Fetching all hashes`);
+  } catch (err) {
+    console.error(err.message);
+    res.status(500).send("Server Error");
+  }
+});
+
 app.get("/hashes", async (req, res) => {
   try {
     const result = await pool.query("Select * from hashes");
     res.json(result.rows);
+    logger.info(`📩 [GET] /hashes - Fetching all hashes`);
+
     // Sends the rows returned by the database query as a JSON response
   } catch (err) {
     console.error(err.message);
     res.status(500).send("Server Error");
   }
 });
+/**
+ * @swagger
+ * /ideas:
+ *   get:
+ *     summary: Fetch all files (ideas) for the authenticated user
+ *     description: Retrieves all files uploaded by the user.
+ *     responses:
+ *       200:
+ *         description: A list of files.
+ *       500:
+ *         description: Server error.
+ */
 
 app.get("/ideas", authenticateToken, async (req, res) => {
   try {
@@ -144,6 +217,9 @@ app.get("/ideas", authenticateToken, async (req, res) => {
       req.user.user_id,
     ]);
     res.json(result.rows);
+    logger.info(
+      `📩 [GET] /ideas - Fetching ideas for user ID: ${req.user.user_id}`
+    );
   } catch (err) {
     console.error(err.message);
     res.status(500).send("Server Error");
@@ -152,6 +228,34 @@ app.get("/ideas", authenticateToken, async (req, res) => {
 
 //now to inserting
 //now with protections against Cross Siet Scripting and SQL IJECTION
+
+/**
+ * @swagger
+ * /users:
+ *   post:
+ *     summary: Create a new user
+ *     description: Adds a new user to the database.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - email
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 format: email
+ *                 description: The user's email address.
+ *     responses:
+ *       200:
+ *         description: User created successfully.
+ *       400:
+ *         description: Invalid email format.
+ *       500:
+ *         description: Server error.
+ */
 app.post(
   "/users",
   [
@@ -187,6 +291,34 @@ app.post(
   }
 );
 
+/**
+ * @swagger
+ * /hashes:
+ *   post:
+ *     summary: Store a new authentication hash
+ *     description: Adds a new hash code for authentication purposes.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - user_id
+ *               - hash_code
+ *             properties:
+ *               user_id:
+ *                 type: integer
+ *                 description: The ID of the user.
+ *               hash_code:
+ *                 type: string
+ *                 description: The generated authentication hash.
+ *     responses:
+ *       200:
+ *         description: Hash stored successfully.
+ *       500:
+ *         description: Server error.
+ */
 app.post("/hashes", async (req, res) => {
   const { user_id, hash_code } = req.body; // extract data from the request body
 
@@ -203,6 +335,38 @@ app.post("/hashes", async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /ideas:
+ *   post:
+ *     summary: Create a new file record
+ *     description: Stores metadata for a newly uploaded file.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - user_id
+ *               - title
+ *               - file_path
+ *             properties:
+ *               user_id:
+ *                 type: integer
+ *                 description: ID of the user.
+ *               title:
+ *                 type: string
+ *                 description: Title of the file.
+ *               file_path:
+ *                 type: string
+ *                 description: Path to the stored file.
+ *     responses:
+ *       200:
+ *         description: File metadata stored successfully.
+ *       500:
+ *         description: Server error.
+ */
 app.post(
   "/ideas",
   // Sanitizes title and content to prevent malicious scripts from being stored.
@@ -307,6 +471,19 @@ async function sendHashByEmail(email, hash_code) {
 }
 
 //this is a route to trigger hash generation (it can be autmate it with a cron job later on)
+
+/**
+ * @swagger
+ * /generate-hash:
+ *   post:
+ *     summary: Generate and send monthly authentication hash
+ *     description: Generates a new authentication hash and emails it to the user.
+ *     responses:
+ *       200:
+ *         description: Hash generated and sent successfully.
+ *       500:
+ *         description: Server error.
+ */
 app.post("/generate-hash", async (req, res) => {
   const user_id = 1; // Since there's only one user (you)
   console.log("Generate Hash Route Hit"); // Debugging
@@ -339,6 +516,35 @@ const loginLimiter = rateLimit({
 
 // this is the login verification - the user (me) will submit the hash for verification and chekc if its valid
 //it is modified to be able to refresh tokens to avoid using frequent logins!
+
+/**
+ * @swagger
+ * /login:
+ *   post:
+ *     summary: User login with authentication hash
+ *     description: Authenticates the user using a one-time hash code and returns access & refresh tokens.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - hash_code
+ *             properties:
+ *               hash_code:
+ *                 type: string
+ *                 description: The user's authentication hash.
+ *     responses:
+ *       200:
+ *         description: Login successful, tokens issued.
+ *       400:
+ *         description: Invalid hash format.
+ *       401:
+ *         description: Invalid or expired hash.
+ *       500:
+ *         description: Server error.
+ */
 app.post(
   "/login",
   loginLimiter, // Limits login attempts to prevent brute force attacks, this isthe rate limit from express
@@ -481,6 +687,19 @@ async function authenticateToken(req, res, next) {
  */
 
 //new post method logout to revoke the tokens
+
+/**
+ * @swagger
+ * /logout:
+ *   post:
+ *     summary: User logout (revoke token)
+ *     description: Revokes the user's current access token.
+ *     responses:
+ *       200:
+ *         description: Logout successful, token revoked.
+ *       500:
+ *         description: Server error.
+ */
 app.post("/logout", authenticateToken, async (req, res) => {
   const token = req.headers.authorization.split(" ")[1]; // correct as it needs the spacing - basically extracts
   // Bearer <token> where the space is after Bearer
@@ -500,6 +719,34 @@ app.post("/logout", authenticateToken, async (req, res) => {
 //when a user log ins , they get the access token and teh refresh token, when the access token expires,
 //the client sends the refresh token to get new access token without logging in again
 
+/**
+ * @swagger
+ * /refresh-token:
+ *   post:
+ *     summary: Refresh access token
+ *     description: Generates a new access token using a refresh token.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - refreshToken
+ *             properties:
+ *               refreshToken:
+ *                 type: string
+ *                 description: The user's refresh token.
+ *     responses:
+ *       200:
+ *         description: New access token issued.
+ *       401:
+ *         description: Refresh token required.
+ *       403:
+ *         description: Invalid refresh token.
+ *       500:
+ *         description: Server error.
+ */
 app.post("/refresh-token", async (req, res) => {
   const { refreshToken } = req.body;
   if (!refreshToken)
@@ -666,6 +913,33 @@ const scanFileForViruses = async (filePath) => {
   }
 };
 
+/**
+ * @swagger
+ * /upload:
+ *   post:
+ *     summary: Upload a file
+ *     description: Uploads a file and stores it in the database.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - file
+ *             properties:
+ *               file:
+ *                 type: string
+ *                 format: binary
+ *                 description: The file to upload.
+ *     responses:
+ *       200:
+ *         description: File uploaded successfully.
+ *       400:
+ *         description: Invalid file type or size.
+ *       500:
+ *         description: File upload failed.
+ */
 app.post(
   "/upload",
   authenticateToken,
@@ -868,6 +1142,28 @@ app.post(
 
 //gets the files within the database
 //  Define /files/searching first (before /files/:id)
+
+/**
+ * @swagger
+ * /files/searching:
+ *   get:
+ *     summary: Search files by tag
+ *     description: Returns files that contain a specific tag.
+ *     parameters:
+ *       - in: query
+ *         name: tag
+ *         required: true
+ *         description: Tag to search for.
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Files found with the given tag.
+ *       400:
+ *         description: Tag is required.
+ *       500:
+ *         description: Server error.
+ */
 app.get("/files/searching", authenticateToken, async (req, res) => {
   console.log("🚀 Route /files/searching is being executed...");
 
@@ -895,8 +1191,8 @@ app.get("/files/searching", authenticateToken, async (req, res) => {
 
     const result = await pool.query(query, params);
 
-    console.log(`✅ Found ${result.rows.length} matching files`);
-    console.log("📂 Result Data:", result.rows);
+    logger.info(`📩 [GET] /files/searching - Searching for files`);
+    logger.info(`🔍 Search Query: ${JSON.stringify(req.query)}`);
 
     return res.json({ files: result.rows });
   } catch (err) {
@@ -911,6 +1207,25 @@ app.get("/files/searching", authenticateToken, async (req, res) => {
 //express routes are sequential
 ////get all the files in the group
 
+/**
+ * @swagger
+ * /files/group/{groupName}:
+ *   get:
+ *     summary: Fetch all files in a group
+ *     description: Retrieves all files belonging to a specific group.
+ *     parameters:
+ *       - in: path
+ *         name: groupName
+ *         required: true
+ *         description: Name of the group.
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: List of files in the group.
+ *       500:
+ *         description: Server error.
+ */
 app.get("/files/group/:groupName", authenticateToken, async (req, res) => {
   const { groupName } = req.params;
 
@@ -923,9 +1238,9 @@ app.get("/files/group/:groupName", authenticateToken, async (req, res) => {
        WHERE LOWER(groups.name) = LOWER($1)`,
       [groupName]
     );
-
-    console.log(`✅ Found ${result.rows.length} files in group ${groupName}`);
-    console.log("📂 File Data:", result.rows);
+    logger.info(
+      `📩 [GET] /files/group/${req.params.groupName} - Fetching files in group`
+    );
 
     res.json({ group: groupName, files: result.rows });
   } catch (err) {
@@ -943,6 +1258,49 @@ app.get("/files/group/:groupName", authenticateToken, async (req, res) => {
 // 🔹 In-memory cache to store search results for faster retrieval
 const cache = new Map();
 
+/**
+ * @swagger
+ * /files/search:
+ *   get:
+ *     summary: Search files with filters and sorting
+ *     description: Allows searching, filtering, and sorting files based on name, type, category, and metadata.
+ *     parameters:
+ *       - in: query
+ *         name: query
+ *         required: false
+ *         description: Search term (file title).
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: type
+ *         required: false
+ *         description: File type extension (e.g., pdf, jpg).
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: category
+ *         required: false
+ *         description: File category (image, video, pdf).
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: sort
+ *         required: false
+ *         description: Sorting criteria (name, date, size, type).
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: order
+ *         required: false
+ *         description: Sorting order (asc or desc).
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Files matching the search criteria.
+ *       500:
+ *         description: Search failed.
+ */
 app.get("/files/search", authenticateToken, async (req, res) => {
   try {
     // Extract query parameters from the request
@@ -1010,8 +1368,8 @@ app.get("/files/search", authenticateToken, async (req, res) => {
     await pool.query("SET enable_seqscan = OFF"); // Force index usage for faster search
 
     // 🛠️ Debugging logs to see generated query
-    console.log("🔹 SQL Query:", sql);
-    console.log("🔹 Query Parameters:", params);
+    logger.info(`📩 [GET] /files/search - Executing file search`);
+    logger.info(`🔍 Query Parameters: ${JSON.stringify(req.query)}`);
 
     // Execute the optimized query with PostgreSQL
     const result = await pool.query(sql, params);
@@ -1039,12 +1397,34 @@ Logs the final SQL query for debugging.
 Executes the query and returns the matching files. */
 
 //this is to retrieve and restore previous versions
+
+/**
+ * @swagger
+ * /files/{id}/versions:
+ *   get:
+ *     summary: Fetch file versions
+ *     description: Retrieves all previous versions of a file.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         description: File ID.
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: File versions retrieved.
+ *       500:
+ *         description: Server error.
+ */
 app.get("/files/:id/versions", authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const user_id = req.user.user_id;
 
-    console.log(`🔍 Fetching versions for file ID: ${id}`);
+    logger.info(
+      `📩 [GET] /files/${req.params.id}/versions - Fetching file versions`
+    );
 
     const result = await pool.query(
       "SELECT * FROM file_versions WHERE file_id = $1 AND user_id = $2 ORDER BY created_at DESC",
@@ -1052,6 +1432,9 @@ app.get("/files/:id/versions", authenticateToken, async (req, res) => {
     );
 
     res.json({ versions: result.rows });
+    logger.info(
+      `📩 [GET] /files/${req.params.id}/versions - Fetching file versions`
+    );
   } catch (err) {
     console.error("🔥 Version Fetch Error:", err.message);
     res.status(500).json({ error: "Failed to fetch file versions." });
@@ -1062,6 +1445,33 @@ app.get("/files/:id/versions", authenticateToken, async (req, res) => {
 //and we can always roll back to a previous version of the same file, this helps delete
 //the need to restore things if you really think about it, makes it all look clean!
 
+/**
+ * @swagger
+ * /files/{id}/rollback/{versionId}:
+ *   put:
+ *     summary: Rollback a file to a previous version
+ *     description: Restores a file to a specified previous version.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         description: ID of the file to rollback.
+ *         schema:
+ *           type: integer
+ *       - in: path
+ *         name: versionId
+ *         required: true
+ *         description: ID of the version to restore.
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: File rolled back successfully.
+ *       404:
+ *         description: Version not found.
+ *       500:
+ *         description: Rollback failed.
+ */
 app.put(
   "/files/:id/rollback/:versionId",
   authenticateToken,
@@ -1097,6 +1507,28 @@ app.put(
 );
 
 // ✅ Then place the /files/:id route AFTER /files/searching
+
+/**
+ * @swagger
+ * /files/{id}:
+ *   get:
+ *     summary: Fetch a specific file by ID
+ *     description: Retrieves the details of a file based on its ID.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         description: ID of the file.
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: File details returned.
+ *       404:
+ *         description: File not found.
+ *       500:
+ *         description: Server error.
+ */
 app.get("/files/:id", authenticateToken, async (req, res) => {
   const { id } = req.params;
 
@@ -1134,6 +1566,43 @@ app.get("/files/:id", authenticateToken, async (req, res) => {
 
 //now we are working on grouping , so we will add a put
 //add remove tags for a file
+/**
+ * @swagger
+ * /files/{id}/tags:
+ *   put:
+ *     summary: Update file tags
+ *     description: Adds or removes tags for a file.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         description: ID of the file to update tags.
+ *         schema:
+ *           type: integer
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - tags
+ *             properties:
+ *               tags:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                 description: List of tags to assign.
+ *     responses:
+ *       200:
+ *         description: Tags updated successfully.
+ *       400:
+ *         description: Invalid input.
+ *       404:
+ *         description: File not found.
+ *       500:
+ *         description: Server error.
+ */
 app.put("/files/:id/tags", authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
@@ -1168,6 +1637,41 @@ app.put("/files/:id/tags", authenticateToken, async (req, res) => {
 });
 
 // BULK TAGGING
+
+/**
+ * @swagger
+ * /files/bulk-tags:
+ *   put:
+ *     summary: Bulk update file tags
+ *     description: Adds or updates tags for multiple files at once.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - file_ids
+ *               - tags
+ *             properties:
+ *               file_ids:
+ *                 type: array
+ *                 items:
+ *                   type: integer
+ *                 description: List of file IDs to update.
+ *               tags:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                 description: List of tags to apply.
+ *     responses:
+ *       200:
+ *         description: Tags updated for multiple files.
+ *       400:
+ *         description: Invalid input.
+ *       500:
+ *         description: Server error.
+ */
 app.put("/files/bulk-tags", authenticateToken, async (req, res) => {
   try {
     const { file_ids, tags } = req.body;
@@ -1201,6 +1705,35 @@ app.put("/files/bulk-tags", authenticateToken, async (req, res) => {
 
 //delete in bulk based on id- > deletes files from both the database and the storage
 // skips any missing files and logs them
+
+/**
+ * @swagger
+ * /files/bulk-delete:
+ *   delete:
+ *     summary: Bulk delete files
+ *     description: Deletes multiple files from the filesystem and database.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - file_ids
+ *             properties:
+ *               file_ids:
+ *                 type: array
+ *                 items:
+ *                   type: integer
+ *                 description: List of file IDs to delete.
+ *     responses:
+ *       200:
+ *         description: Files deleted successfully.
+ *       400:
+ *         description: Invalid input.
+ *       500:
+ *         description: Server error.
+ */
 app.delete("/files/bulk-delete", authenticateToken, async (req, res) => {
   try {
     const { file_ids } = req.body;
@@ -1248,6 +1781,43 @@ app.delete("/files/bulk-delete", authenticateToken, async (req, res) => {
 //rename in bulk based on an arrya that has the id and the new name , it is object based
 //it renames the files in both the dababase and filesystem .
 
+/**
+ * @swagger
+ * /files/bulk-rename:
+ *   put:
+ *     summary: Bulk rename files
+ *     description: Renames multiple files in both the filesystem and database.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - files
+ *             properties:
+ *               files:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   required:
+ *                     - id
+ *                     - newName
+ *                   properties:
+ *                     id:
+ *                       type: integer
+ *                       description: ID of the file to rename.
+ *                     newName:
+ *                       type: string
+ *                       description: The new name for the file.
+ *     responses:
+ *       200:
+ *         description: Files renamed successfully.
+ *       400:
+ *         description: Invalid input.
+ *       500:
+ *         description: Bulk rename failed.
+ */
 app.put("/files/bulk-rename", authenticateToken, async (req, res) => {
   try {
     const { files } = req.body;
@@ -1303,6 +1873,19 @@ app.put("/files/bulk-rename", authenticateToken, async (req, res) => {
 });
 
 //to download in bulk:
+
+/**
+ * @swagger
+ * /files/bulk-download:
+ *   post:
+ *     summary: Bulk download files as ZIP
+ *     description: Downloads multiple files in a ZIP archive.
+ *     responses:
+ *       200:
+ *         description: ZIP file created successfully.
+ *       500:
+ *         description: ZIP file generation failed.
+ */
 app.post("/files/bulk-download", authenticateToken, async (req, res) => {
   // This route handler listens for POST requests to '/files/bulk-download' and requires authentication
   try {
@@ -1408,7 +1991,19 @@ app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
 //app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
-app.post("/cleanup-missing-files", async (req, res) => {
+/**
+ * @swagger
+ * /cleanup-missing-files:
+ *   post:
+ *     summary: Cleanup missing files
+ *     description: Deletes orphaned database records for files that no longer exist in storage.
+ *     responses:
+ *       200:
+ *         description: Missing files removed successfully.
+ *       500:
+ *         description: Cleanup failed.
+ */
+app.delete("/cleanup-missing-files", async (req, res) => {
   try {
     console.log("Checking for missing files...");
 
@@ -1421,6 +2016,9 @@ app.post("/cleanup-missing-files", async (req, res) => {
         deletedCount++;
       }
     }
+    logger.info(
+      `📩 [DELETE] /cleanup-missing-files - Deleted ${deletedCount} orphaned records`
+    );
 
     res.json({ message: `Deleted ${deletedCount} orphaned records.` });
   } catch (err) {
@@ -1428,8 +2026,52 @@ app.post("/cleanup-missing-files", async (req, res) => {
     res.status(500).json({ error: "Cleanup failed." });
   }
 });
+//just in case it was meant to be a POST ^
+/**app.post("/cleanup-missing-files", async (req, res) => {
+  try {
+    console.log("Checking for missing files...");
+
+    const result = await pool.query("SELECT id, file_path FROM ideas");
+
+    let deletedCount = 0;
+    for (const row of result.rows) {
+      if (!fs.existsSync(row.file_path)) {
+        await pool.query("DELETE FROM ideas WHERE id = $1", [row.id]);
+        deletedCount++;
+      }
+    }
+    logger.info(`📩 [GET] /cleanup-missing-files - Checking for missing files`);
+
+    res.json({ message: `Deleted ${deletedCount} orphaned records.` });
+  } catch (err) {
+    console.error("Cleanup Error:", err.message);
+    res.status(500).json({ error: "Cleanup failed." });
+  }
+}); */
 
 // to download the decrypted file
+
+/**
+ * @swagger
+ * /files/{id}/download:
+ *   get:
+ *     summary: Download a decrypted file
+ *     description: Retrieves and decrypts a file before sending it for download.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         description: ID of the file to download.
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: File downloaded successfully.
+ *       404:
+ *         description: File not found.
+ *       500:
+ *         description: Failed to download file.
+ */
 app.get("/files/:id/download", authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
@@ -1447,6 +2089,9 @@ app.get("/files/:id/download", authenticateToken, async (req, res) => {
     )}`;
 
     await decryptFile(encryptedFilePath, decryptedFilePath);
+    logger.info(
+      `📩 [GET] /files/${req.params.id}/download - Download request received`
+    );
 
     res.download(decryptedFilePath, (err) => {
       if (err) console.error("🔥 Download Error:", err.message);
@@ -1460,6 +2105,27 @@ app.get("/files/:id/download", authenticateToken, async (req, res) => {
 
 // DELETE endpoint to remove a file
 
+/**
+ * @swagger
+ * /files/{id}:
+ *   delete:
+ *     summary: Delete a file
+ *     description: Deletes a file from both the filesystem and database.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         description: ID of the file to delete.
+ *         schema:
+ *           type: integer
+ *     responses:
+ *       200:
+ *         description: File deleted successfully.
+ *       404:
+ *         description: File not found.
+ *       500:
+ *         description: Server error.
+ */
 app.delete("/files/:id", authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
@@ -1554,6 +2220,42 @@ console.log(
 );
 
 //this route is to rename the file  in the file systme
+
+/**
+ * @swagger
+ * /files/{id}/rename:
+ *   put:
+ *     summary: Rename a file
+ *     description: Renames a file in the system and updates the database.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         description: ID of the file to rename.
+ *         schema:
+ *           type: integer
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - newName
+ *             properties:
+ *               newName:
+ *                 type: string
+ *                 description: The new name for the file.
+ *     responses:
+ *       200:
+ *         description: File renamed successfully.
+ *       400:
+ *         description: Invalid input.
+ *       404:
+ *         description: File not found.
+ *       500:
+ *         description: Server error.
+ */
 app.put("/files/:id/rename", authenticateToken, async (req, res) => {
   try {
     console.log("🔹 Received Rename Request:", req.body);
@@ -1634,6 +2336,33 @@ Returns a success response */
 //the "groups" of different types of data
 
 //to create a new group
+
+/**
+ * @swagger
+ * /groups:
+ *   post:
+ *     summary: Create a new group
+ *     description: Creates a new file group.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - name
+ *             properties:
+ *               name:
+ *                 type: string
+ *                 description: The name of the group.
+ *     responses:
+ *       200:
+ *         description: Group created successfully.
+ *       400:
+ *         description: Group name is required.
+ *       500:
+ *         description: Server error.
+ */
 app.post("/groups", authenticateToken, async (req, res) => {
   const { name } = req.body;
 
@@ -1643,6 +2372,8 @@ app.post("/groups", authenticateToken, async (req, res) => {
       "INSERT INTO groups (name) VALUES ($1) RETURNING *",
       [name]
     );
+    logger.info(`📩 [GET] /groups - Fetching all groups`);
+
     res.json({ message: "Group created!", group: result.rows[0] });
   } catch (err) {
     console.error(err.message);
@@ -1651,6 +2382,40 @@ app.post("/groups", authenticateToken, async (req, res) => {
 });
 
 //assign a file to a group
+
+/**
+ * @swagger
+ * /files/{id}/group:
+ *   put:
+ *     summary: Assign a file to a group
+ *     description: Assigns a file to a specified group.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         description: ID of the file to assign.
+ *         schema:
+ *           type: integer
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - groupName
+ *             properties:
+ *               groupName:
+ *                 type: string
+ *                 description: Name of the group to assign the file to.
+ *     responses:
+ *       200:
+ *         description: File assigned to group successfully.
+ *       400:
+ *         description: Invalid input.
+ *       500:
+ *         description: Server error.
+ */
 app.put("/files/:id/group", authenticateToken, async (req, res) => {
   const { id } = req.params;
   const { groupName } = req.body;
