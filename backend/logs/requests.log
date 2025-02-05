@@ -1,0 +1,21 @@
+2025-02-03T23:02:43.303Z [INFO]: 🚀 Incoming Request: GET /
+2025-02-03T23:02:43.305Z [INFO]: 📩 [GET] / - Incoming Request
+2025-02-03T23:02:43.306Z [INFO]: 🔍 Request Params: {}
+2025-02-03T23:02:43.306Z [INFO]: 📝 Request Query: {}
+2025-02-03T23:02:43.326Z [INFO]: 🚀 Incoming Request: GET /favicon.ico
+2025-02-03T23:02:43.326Z [INFO]: 📩 [GET] /favicon.ico - Incoming Request
+2025-02-03T23:02:43.327Z [INFO]: 🔍 Request Params: {}
+2025-02-03T23:02:43.327Z [INFO]: 📝 Request Query: {}
+2025-02-03T23:04:48.048Z [INFO]: 🚀 Incoming Request: GET /
+2025-02-03T23:04:48.048Z [INFO]: 📩 [GET] / - Incoming Request
+2025-02-03T23:04:48.049Z [INFO]: 🔍 Request Params: {}
+2025-02-03T23:04:48.049Z [INFO]: 📝 Request Query: {}
+2025-02-03T23:04:49.692Z [INFO]: 🚀 Incoming Request: GET /
+2025-02-03T23:04:49.693Z [INFO]: 📩 [GET] / - Incoming Request
+2025-02-03T23:04:49.693Z [INFO]: 🔍 Request Params: {}
+2025-02-03T23:04:49.693Z [INFO]: 📝 Request Query: {}
+2025-02-04T22:16:06.979Z [INFO]: 🚀 Incoming Request: GET /
+2025-02-04T22:16:06.981Z [INFO]: 📩 [GET] / - Incoming Request
+2025-02-04T22:16:06.981Z [INFO]: 🔍 Request Params: {}
+2025-02-04T22:16:06.982Z [INFO]: 📝 Request Query: {}
+2025-02-04T22:19:39.597Z [ERROR]: 🔥 Uncaught Exception: listen EADDRINUSE: address already in use :::3000
