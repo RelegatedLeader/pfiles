@@ -90,6 +90,9 @@ const pool = new Pool({
   password: process.env.DB_PASSWORD,
   port: process.env.DB_PORT,
 });
+//try
+
+console.log("DB Password:", typeof process.env.DB_PASSWORD);
 
 //lets log them at the start to see if they work
 //make sure to leave a placeholder for the refresh token and then replace it with the real one

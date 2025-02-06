@@ -1,0 +1,11 @@
+services:
+  - name: PFiles-Backend
+    type: web
+    env: node
+    buildCommand: "npm install"
+    startCommand: "node backend/server.js"
+    envVars:
+      - key: DATABASE_URL
+        fromService:
+          name: pfiles-db
+          type: postgres
