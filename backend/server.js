@@ -2477,6 +2477,6 @@ process.on("unhandledRejection", (err) => {
   logger.error(`⚠️ Unhandled Rejection: ${err.message}`);
 });
 
-app.listen(port, () => {
+app.listen(process.env.DB_PORT || 3000, () => {
   console.log(`Server is listening on port ${port}`);
 });
