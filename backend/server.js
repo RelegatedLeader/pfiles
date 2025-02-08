@@ -2477,6 +2477,17 @@ process.on("unhandledRejection", (err) => {
   logger.error(`⚠️ Unhandled Rejection: ${err.message}`);
 });
 
+console.log("Registered Routes:");
+app._router.stack.forEach((middleware) => {
+  if (middleware.route) {
+    console.log(
+      `🔹 ${Object.keys(middleware.route.methods).join(", ").toUpperCase()} ${
+        middleware.route.path
+      }`
+    );
+  }
+});
+
 app.listen(port, () => {
   console.log(`Server is listening on port ${port}`);
 });
