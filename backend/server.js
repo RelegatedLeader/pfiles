@@ -44,7 +44,7 @@ console.log(process.env);
 
 const app = express();
 
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 10000; // Ensure it uses Render's assigned port
 // ✅ Apply Helmet security headers early in the middleware stack
 app.use(
   helmet({
@@ -102,11 +102,11 @@ app.use(express.json()); // Middleware to parse JSON bodies
 
 const pool = new Pool({
   user: process.env.DB_USER,
-  host: process.env.DB_HOST,
+  host: process.env.DB_HOST, // This should be your Tailscale IP (100.111.63.61)
   database: process.env.DB_NAME,
   password: process.env.DB_PASSWORD,
   port: process.env.DB_PORT,
-  ssl: false, // Disable SSL for local connection
+  ssl: { rejectUnauthorized: false }, // Needed for remote PostgreSQL connection
 });
 
 //try
@@ -2477,6 +2477,6 @@ process.on("unhandledRejection", (err) => {
   logger.error(`⚠️ Unhandled Rejection: ${err.message}`);
 });
 
-app.listen(process.env.DB_PORT || 3000, () => {
+app.listen(port, () => {
   console.log(`Server is listening on port ${port}`);
 });
