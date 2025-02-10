@@ -56,13 +56,15 @@ app.use(
     noSniff: true, // Prevent MIME-type sniffing
   })
 );
+app.use(express.json()); // Middleware to parse JSON bodies , should be placed before all routes.
 
 ///adds swagger middleware.
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(specs));
 console.log("Swagger Docs available at: http://localhost:3000/api-docs");
 // ✅ CORS Configuration (Keep it after Helmet)
 const corsOptions = {
-  origin: ["http://localhost:3000"], // Update for production
+  origin: "*",
+  // origin: ["http://localhost:3000"], // Update for production
   methods: "GET,POST,PUT,DELETE",
   allowedHeaders: "Content-Type,Authorization",
 };
@@ -81,8 +83,6 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json()); // Middleware to parse JSON bodies
-
 //before and after
 /**const pool = new Pool({
   user: process.env.DB_USER,
@@ -100,13 +100,15 @@ app.use(express.json()); // Middleware to parse JSON bodies
   },
 }); */
 
+const isRender = process.env.RENDER === "true"; // Check if running on Render
+
 const pool = new Pool({
   user: process.env.DB_USER,
-  host: process.env.DB_HOST, // This should be your Tailscale IP (100.111.63.61)
+  host: isRender ? process.env.DB_HOST : "localhost", // Use localhost if not on Render
   database: process.env.DB_NAME,
   password: process.env.DB_PASSWORD,
-  port: process.env.DB_PORT,
-  ssl: { rejectUnauthorized: false }, // Needed for remote PostgreSQL connection
+  port: process.env.DB_PORT || 5432, // Default to local PostgreSQL port
+  ssl: isRender ? { rejectUnauthorized: false } : false, // Only use SSL on Render
 });
 
 //try
