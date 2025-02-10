@@ -63,7 +63,7 @@ app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(specs));
 console.log("Swagger Docs available at: http://localhost:3000/api-docs");
 // ✅ CORS Configuration (Keep it after Helmet)
 const corsOptions = {
-  origin: "*",
+  origin: ["http://localhost:3000", "https://pfiles.onrender.com"], // Allow frontend & API
   // origin: ["http://localhost:3000"], // Update for production
   methods: "GET,POST,PUT,DELETE",
   allowedHeaders: "Content-Type,Authorization",
@@ -100,7 +100,8 @@ app.use((req, res, next) => {
   },
 }); */
 
-const isRender = process.env.RENDER === "true"; // Check if running on Render
+//made me take it off again
+/**const isRender = process.env.RENDER === "true"; // Check if running on Render
 
 const pool = new Pool({
   user: process.env.DB_USER,
@@ -109,6 +110,11 @@ const pool = new Pool({
   password: process.env.DB_PASSWORD,
   port: process.env.DB_PORT || 5432, // Default to local PostgreSQL port
   ssl: isRender ? { rejectUnauthorized: false } : false, // Only use SSL on Render
+}); */
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }, // Render requires this for SSL
 });
 
 //try
