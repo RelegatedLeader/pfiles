@@ -112,9 +112,11 @@ const pool = new Pool({
   ssl: isRender ? { rejectUnauthorized: false } : false, // Only use SSL on Render
 }); */
 
+//i ended up creating an instance of it in render and this whole file
+//serves as an API
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // Render requires this for SSL
+  ssl: { rejectUnauthorized: false }, // Required for Render PostgreSQL
 });
 
 //try
