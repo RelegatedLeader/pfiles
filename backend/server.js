@@ -599,6 +599,7 @@ app.post(
     }
 
     const { hash_code } = req.body; // Extracts hash from user input
+    console.log("🔍 Received hash from frontend:", hash_code);
 
     try {
       console.log("🔍 Checking hash validity in database...");

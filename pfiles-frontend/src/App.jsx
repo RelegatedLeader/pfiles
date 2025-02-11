@@ -1,15 +1,16 @@
-import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
-import Login from "./pages/Login"; // Ensure correct import path
-import Dashboard from "./pages/Dashboard"; // Replace with actual Dashboard component
+import { useEffect } from "react";
+import "./App.css";
+import AppRoutes from "./routes/routes.jsx";
 
 function App() {
+  useEffect(() => {
+    console.log("✅ App Component Loaded!");
+  }, []);
+
   return (
-    <Router>
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route path="/dashboard" element={<Dashboard />} />
-      </Routes>
-    </Router>
+    <div>
+      <AppRoutes />
+    </div>
   );
 }
 
