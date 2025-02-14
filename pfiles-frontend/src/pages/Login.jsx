@@ -9,9 +9,12 @@ function Login() {
   const handleLogin = async () => {
     try {
       console.log("🔑 Attempting Login with Hash:", hash);
-      const response = await axios.post("https://pfiles.onrender.com/login", {
-        hash_code: hash,
-      });
+
+      const response = await axios.post(
+        "https://pfiles.onrender.com/login",
+        { hash_code: hash },
+        { withCredentials: true } // Ensures authentication headers/cookies are sent
+      );
 
       console.log("✅ Server Response:", response.data);
 
