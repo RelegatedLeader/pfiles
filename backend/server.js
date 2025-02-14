@@ -597,6 +597,11 @@ app.post(
     console.log("🔑 Login route hit!"); // Debugging: Log that the login route is accessed
     console.log("Received hash_code:", req.body.hash_code); // Debugging: Check the provided hash
 
+    res.header("Access-Control-Allow-Origin", "http://localhost:5173");
+    res.header("Access-Control-Allow-Credentials", "true");
+    res.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE");
+    res.header("Access-Control-Allow-Headers", "Content-Type,Authorization");
+
     //from express-validator that is used to prevent XSS and SQL injection attacks
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
