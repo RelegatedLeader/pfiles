@@ -585,7 +585,7 @@ const loginLimiter = rateLimit({
  */
 app.post(
   "/login",
-  loginLimiter, // Limits login attempts to prevent brute force attacks, this isthe rate limit from express
+  loginLimiter, // Limits login attempts to prevent brute force attacks
   [
     body("hash_code")
       .trim() // Removes whitespace from start and end to avoid issues with input
@@ -597,12 +597,13 @@ app.post(
     console.log("🔑 Login route hit!"); // Debugging: Log that the login route is accessed
     console.log("Received hash_code:", req.body.hash_code); // Debugging: Check the provided hash
 
+    // 🔹 Fix CORS issue
     res.header("Access-Control-Allow-Origin", "http://localhost:5173");
     res.header("Access-Control-Allow-Credentials", "true");
     res.header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE");
     res.header("Access-Control-Allow-Headers", "Content-Type,Authorization");
 
-    //from express-validator that is used to prevent XSS and SQL injection attacks
+    // 🔹 Validate Input to Prevent XSS & SQL Injection
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       console.log("❌ Validation Errors:", errors.array()); // Log validation errors
@@ -626,7 +627,19 @@ app.post(
 
       const user_id = result.rows[0].user_id; // Retrieve the user ID linked to the hash
 
-      console.log("✅ Hash verified, generating tokens...");
+      console.log(
+        `✅ Hash verified! Generating tokens for user ID: ${user_id}`
+      );
+
+      // 🔍 **Check if user exists before inserting refresh token**
+      const userCheck = await pool.query("SELECT * FROM users WHERE id = $1", [
+        user_id,
+      ]);
+
+      if (userCheck.rows.length === 0) {
+        console.error(`❌ User ID ${user_id} not found in users table!`);
+        return res.status(500).json({ error: "User does not exist." });
+      }
 
       // Generate Access Token (Short-lived, used for authentication)
       const accessToken = jwt.sign({ user_id }, process.env.JWT_SECRET, {

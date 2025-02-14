@@ -5,11 +5,10 @@ import axios from "axios";
 function Login() {
   const [hash, setHash] = useState("");
   const navigate = useNavigate();
-
   const handleLogin = async () => {
     try {
       console.log("🔑 Attempting Login with Hash:", hash);
-      
+
       const response = await axios.post(
         "https://pfiles.onrender.com/login",
         { hash_code: hash },
@@ -18,15 +17,15 @@ function Login() {
           withCredentials: true, // REQUIRED for CORS & authentication
         }
       );
-  
+
       console.log("✅ Server Response:", response.data);
-      
+
       const { accessToken } = response.data;
       if (!accessToken) {
         alert("Login failed. No token received.");
         return;
       }
-  
+
       localStorage.setItem("jwt", accessToken);
       alert("Login successful! Redirecting...");
       navigate("/dashboard");
@@ -34,8 +33,6 @@ function Login() {
       console.error("❌ Login Error:", error.response?.data || error.message);
       alert("Login failed. Check your hash.");
     }
-  };
-  
   };
 
   return (
