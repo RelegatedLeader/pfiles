@@ -57,18 +57,24 @@ app.use(
   })
 );
 app.use(express.json()); // Middleware to parse JSON bodies , should be placed before all routes.
+app.use(express.urlencoded({ extended: true })); // Parses URL-encoded bodies
+//app.use(cors()); // Allow requests from frontend
+//app.options("*", cors()); // Allow all preflight requests
 
 ///adds swagger middleware.
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(specs));
 console.log("Swagger Docs available at: http://localhost:3000/api-docs");
 // ✅ CORS Configuration (Keep it after Helmet)
 const corsOptions = {
-  origin: ["http://localhost:3000", "https://pfiles.onrender.com"], // Allow frontend & API
+  origin: ["http://localhost:5173", "https://pfiles.onrender.com"], // Allow frontend & API
   // origin: ["http://localhost:3000"], // Update for production
   methods: "GET,POST,PUT,DELETE",
   allowedHeaders: "Content-Type,Authorization",
+  credentials: true, // Allows sending cookies/auth headers
 };
-app.use(cors(corsOptions));
+app.use(cors(corsOptions)); // Apply the correct CORS config
+app.options("*", cors(corsOptions)); // Enable preflight for all routes
+
 //postgreSQL connection setup
 
 //this is the middleware for swagger  - the api configuration
